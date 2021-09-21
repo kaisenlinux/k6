@@ -1,0 +1,5 @@
+k6 (0.32.0-1kaisen) kaisen-packages; urgency=medium
+
+  * First packaging for Kaisen Linux
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Mon, 20 Sep 2021 18:12:30 +0200

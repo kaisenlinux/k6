@@ -1,0 +1,16 @@
+Source: k6
+Section: admin
+Priority: optional
+Maintainer: Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.0
+Homepage: https://k6.io
+Vcs-Browser: https://gitlab.com/kaisenlinux/packages/k6
+Vcs-Git: https://gitlab.com/kaisenlinux/packages/k6.git
+XS-Go-Import-Path: github.com/grafana/k6
+
+Package: k6
+Architecture: amd64 arm64
+Depends: ${shlibs:Depends},
+	 ${misc:Depends},
+Description: A modern load testing tool, using Go and JavaScript
