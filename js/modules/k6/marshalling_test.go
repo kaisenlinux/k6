@@ -39,8 +39,8 @@ import (
 )
 
 func TestSetupDataMarshalling(t *testing.T) {
+	t.Parallel()
 	tb := httpmultibin.NewHTTPMultiBin(t)
-	defer tb.Cleanup()
 
 	script := []byte(tb.Replacer.Replace(`
 		import http from "k6/http";
@@ -137,7 +137,7 @@ func TestSetupDataMarshalling(t *testing.T) {
 	if !assert.NoError(t, runner.Setup(context.Background(), samples)) {
 		return
 	}
-	initVU, err := runner.NewVU(1, samples)
+	initVU, err := runner.NewVU(1, 1, samples)
 	if assert.NoError(t, err) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()

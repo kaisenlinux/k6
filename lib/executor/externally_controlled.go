@@ -361,7 +361,9 @@ func (rs *externallyControlledRunState) newManualVUHandle(
 	}
 	ctx, cancel := context.WithCancel(rs.ctx)
 	return &manualVUHandle{
-		vuHandle: newStoppedVUHandle(ctx, getVU, returnVU, &rs.executor.config.BaseConfig, logger),
+		vuHandle: newStoppedVUHandle(ctx, getVU, returnVU,
+			rs.executor.nextIterationCounters,
+			&rs.executor.config.BaseConfig, logger),
 		initVU:   initVU,
 		wg:       &wg,
 		cancelVU: cancel,
@@ -520,6 +522,14 @@ func (mex *ExternallyControlled) Run(parentCtx context.Context, out chan<- stats
 	).Debug("Starting executor run...")
 
 	startMaxVUs := mex.executionState.Options.ExecutionSegment.Scale(mex.config.MaxVUs.Int64)
+
+	ss := &lib.ScenarioState{
+		Name:      mex.config.Name,
+		Executor:  mex.config.Type,
+		StartTime: time.Now(),
+	}
+	ctx = lib.WithScenarioState(ctx, ss)
+
 	runState := &externallyControlledRunState{
 		ctx:             ctx,
 		executor:        mex,
@@ -531,6 +541,8 @@ func (mex *ExternallyControlled) Run(parentCtx context.Context, out chan<- stats
 		maxVUs:          new(int64),
 		runIteration:    getIterationRunner(mex.executionState, mex.logger),
 	}
+	ss.ProgressFn = runState.progressFn
+
 	*runState.maxVUs = startMaxVUs
 	if err = runState.retrieveStartMaxVUs(); err != nil {
 		return err

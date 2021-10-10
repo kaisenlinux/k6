@@ -34,22 +34,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
 	"go.k6.io/k6/cloudapi"
+	"go.k6.io/k6/errext"
+	"go.k6.io/k6/errext/exitcodes"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/consts"
 	"go.k6.io/k6/loader"
-	"go.k6.io/k6/ui"
 	"go.k6.io/k6/ui/pb"
-)
-
-const (
-	cloudFailedToGetProgressErrorCode = 98
-	cloudTestRunFailedErrorCode       = 99
 )
 
 //nolint:gochecknoglobals
@@ -83,7 +80,7 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 				}
 			}
 			// TODO: disable in quiet mode?
-			_, _ = BannerColor.Fprintf(stdout, "\n%s\n\n", consts.Banner())
+			_, _ = fmt.Fprintf(stdout, "\n%s\n\n", getBanner(noColor || !stdoutTTY))
 
 			progressBar := pb.New(
 				pb.WithConstLeft("Init"),
@@ -126,9 +123,9 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 				return err
 			}
 
-			derivedConf, cerr := deriveAndValidateConfig(conf, r.IsExecutable)
-			if cerr != nil {
-				return ExitCode{error: cerr, Code: invalidConfigErrorCode}
+			derivedConf, err := deriveAndValidateConfig(conf, r.IsExecutable)
+			if err != nil {
+				return err
 			}
 
 			// TODO: validate for usage of execution segment
@@ -138,15 +135,6 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 			err = r.SetOptions(conf.Options)
 			if err != nil {
 				return err
-			}
-
-			// Cloud config
-			cloudConfig, err := cloudapi.GetConsolidatedConfig(derivedConf.Collectors["cloud"], osEnvironment, "")
-			if err != nil {
-				return err
-			}
-			if !cloudConfig.Token.Valid {
-				return errors.New("Not logged in, please use `k6 login cloud`.") //nolint:golint
 			}
 
 			modifyAndPrintBar(progressBar, pb.WithConstProgress(0, "Building the archive"))
@@ -167,20 +155,26 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 				}
 			}
 
-			if err = cloudapi.MergeFromExternal(arc.Options.External, &cloudConfig); err != nil {
+			// Cloud config
+			cloudConfig, err := cloudapi.GetConsolidatedConfig(
+				derivedConf.Collectors["cloud"], osEnvironment, "", arc.Options.External)
+			if err != nil {
 				return err
+			}
+			if !cloudConfig.Token.Valid {
+				return errors.New("Not logged in, please use `k6 login cloud`.") //nolint:golint,revive,stylecheck
 			}
 			if tmpCloudConfig == nil {
 				tmpCloudConfig = make(map[string]interface{}, 3)
 			}
 
-			if _, ok := tmpCloudConfig["token"]; !ok && cloudConfig.Token.Valid {
+			if cloudConfig.Token.Valid {
 				tmpCloudConfig["token"] = cloudConfig.Token
 			}
-			if _, ok := tmpCloudConfig["name"]; !ok && cloudConfig.Name.Valid {
+			if cloudConfig.Name.Valid {
 				tmpCloudConfig["name"] = cloudConfig.Name
 			}
-			if _, ok := tmpCloudConfig["projectID"]; !ok && cloudConfig.ProjectID.Valid {
+			if cloudConfig.ProjectID.Valid {
 				tmpCloudConfig["projectID"] = cloudConfig.ProjectID
 			}
 
@@ -233,7 +227,7 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 
 				sig = <-sigC
 				logger.WithField("sig", sig).Error("Aborting k6 in response to signal, we won't wait for the test to end.")
-				os.Exit(externalAbortErrorCode)
+				os.Exit(int(exitcodes.ExternalAbort))
 			}()
 
 			et, err := lib.NewExecutionTuple(derivedConf.ExecutionSegment, derivedConf.ExecutionSegmentSequence)
@@ -242,7 +236,10 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 			}
 			testURL := cloudapi.URLForResults(refID, cloudConfig)
 			executionPlan := derivedConf.Scenarios.GetFullExecutionRequirements(et)
-			printExecutionDescription("cloud", filename, testURL, derivedConf, et, executionPlan, nil)
+			printExecutionDescription(
+				"cloud", filename, testURL, derivedConf, et,
+				executionPlan, nil, noColor || !stdoutTTY,
+			)
 
 			modifyAndPrintBar(
 				progressBar,
@@ -326,15 +323,17 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 			}
 
 			if testProgress == nil {
-				//nolint:golint
-				return ExitCode{error: errors.New("Test progress error"), Code: cloudFailedToGetProgressErrorCode}
+				//nolint:stylecheck,golint
+				return errext.WithExitCodeIfNone(errors.New("Test progress error"), exitcodes.CloudFailedToGetProgress)
 			}
 
-			fprintf(stdout, "     test status: %s\n", ui.ValueColor.Sprint(testProgress.RunStatusText))
+			valueColor := getColor(noColor || !stdoutTTY, color.FgCyan)
+			fprintf(stdout, "     test status: %s\n", valueColor.Sprint(testProgress.RunStatusText))
 
 			if testProgress.ResultStatus == cloudapi.ResultStatusFailed {
-				//nolint:golint
-				return ExitCode{error: errors.New("The test has failed"), Code: cloudTestRunFailedErrorCode}
+				// TODO: use different exit codes for failed thresholds vs failed test (e.g. aborted by system/limit)
+				//nolint:stylecheck,golint
+				return errext.WithExitCodeIfNone(errors.New("The test has failed"), exitcodes.CloudTestRunFailed)
 			}
 
 			return nil

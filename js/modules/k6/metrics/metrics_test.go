@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.k6.io/k6/js/common"
+	"go.k6.io/k6/js/modulestest"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/stats"
 )
@@ -61,11 +62,14 @@ func TestMetrics(t *testing.T) {
 					t.Parallel()
 					rt := goja.New()
 					rt.SetFieldNameMapper(common.FieldNameMapper{})
-
-					ctxPtr := new(context.Context)
-					*ctxPtr = common.WithRuntime(context.Background(), rt)
-					rt.Set("metrics", common.Bind(rt, New(), ctxPtr))
-
+					mii := &modulestest.InstanceCore{
+						Runtime: rt,
+						InitEnv: &common.InitEnvironment{},
+						Ctx:     context.Background(),
+					}
+					m, ok := New().NewModuleInstance(mii).(*ModuleInstance)
+					require.True(t, ok)
+					require.NoError(t, rt.Set("metrics", m.GetExports().Named))
 					root, _ := lib.NewGroup("", nil)
 					child, _ := root.Group("child")
 					samples := make(chan stats.SampleContainer, 1000)
@@ -81,14 +85,13 @@ func TestMetrics(t *testing.T) {
 						isTimeString = `, true`
 					}
 					_, err := rt.RunString(fmt.Sprintf(`var m = new metrics.%s("my_metric"%s)`, fn, isTimeString))
-					if !assert.NoError(t, err) {
-						return
-					}
+					require.NoError(t, err)
 
 					t.Run("ExitInit", func(t *testing.T) {
-						*ctxPtr = lib.WithState(*ctxPtr, state)
+						mii.State = state
+						mii.InitEnv = nil
 						_, err := rt.RunString(fmt.Sprintf(`new metrics.%s("my_metric")`, fn))
-						assert.EqualError(t, err, "GoError: metrics must be declared in the init context at apply (native)")
+						assert.Contains(t, err.Error(), "metrics must be declared in the init context")
 					})
 
 					groups := map[string]*lib.Group{
@@ -170,4 +173,32 @@ func TestMetricNames(t *testing.T) {
 			assert.Equal(t, value, checkName(key), key)
 		})
 	}
+}
+
+func TestMetricGetName(t *testing.T) {
+	t.Parallel()
+	rt := goja.New()
+	rt.SetFieldNameMapper(common.FieldNameMapper{})
+
+	mii := &modulestest.InstanceCore{
+		Runtime: rt,
+		InitEnv: &common.InitEnvironment{},
+		Ctx:     context.Background(),
+	}
+	m, ok := New().NewModuleInstance(mii).(*ModuleInstance)
+	require.True(t, ok)
+	require.NoError(t, rt.Set("metrics", m.GetExports().Named))
+	v, err := rt.RunString(`
+		var m = new metrics.Counter("my_metric")
+		m.name
+	`)
+	require.NoError(t, err)
+	require.Equal(t, "my_metric", v.String())
+
+	_, err = rt.RunString(`
+		"use strict";
+		m.name = "something"
+	`)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "TypeError: Cannot assign to read only property 'name'")
 }

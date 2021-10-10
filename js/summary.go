@@ -21,7 +21,8 @@
 package js
 
 import (
-	"bytes"
+	_ "embed" // this is used to embed the contents of summary.js
+	"encoding/json"
 	"fmt"
 	"io"
 	"time"
@@ -30,92 +31,14 @@ import (
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/stats"
-	"go.k6.io/k6/ui"
 )
 
-// TODO: move this to a separate JS file and use go.rice to embed it
-const summaryWrapperLambdaCode = `
-(function() {
-	var forEach = function (obj, callback) {
-		for (var key in obj) {
-			if (obj.hasOwnProperty(key)) {
-				if (callback(key, obj[key])) {
-					break;
-				}
-			}
-		}
-	}
+// Copied from https://github.com/k6io/jslib.k6.io/tree/master/lib/k6-summary
+//go:embed summary.js
+var jslibSummaryCode string //nolint:gochecknoglobals
 
-	var transformGroup = function(group) {
-		if (Array.isArray(group.groups)) {
-			var newFormatGroups = group.groups;
-			group.groups = {};
-			for (var i = 0; i < newFormatGroups.length; i++) {
-				group.groups[newFormatGroups[i].name] = transformGroup(newFormatGroups[i]);
-			}
-		}
-		if (Array.isArray(group.checks)) {
-			var newFormatChecks = group.checks;
-			group.checks = {};
-			for (var i = 0; i < newFormatChecks.length; i++) {
-				group.checks[newFormatChecks[i].name] = newFormatChecks[i];
-			}
-		}
-		return group;
-	};
-
-	var oldJSONSummary = function(data) {
-		// Quick copy of the data, since it's easiest to modify it in place.
-		var results = JSON.parse(JSON.stringify(data));
-		delete results.options;
-
-		forEach(results.metrics, function(metricName, metric) {
-			var oldFormatMetric = metric.values;
-			if (metric.thresholds && Object.keys(metric.thresholds).length > 0) {
-				var newFormatThresholds = metric.thresholds;
-				oldFormatMetric.thresholds = {};
-				forEach(newFormatThresholds, function(thresholdName, threshold) {
-					oldFormatMetric.thresholds[thresholdName] = !threshold.ok;
-				});
-			}
-			if (metric.type == 'rate' && oldFormatMetric.hasOwnProperty('rate')) {
-				oldFormatMetric.value = oldFormatMetric.rate; // sigh...
-				delete oldFormatMetric.rate;
-			}
-			results.metrics[metricName] = oldFormatMetric;
-		});
-
-		results.root_group = transformGroup(results.root_group);
-
-		return JSON.stringify(results, null, 4);
-	};
-
-	// TODO: bundle the text summary generation from jslib and get rid of oldCallback
-
-	return function(exportedSummaryCallback, jsonSummaryPath, data, oldCallback) {
-		var result = {};
-		if (exportedSummaryCallback) {
-			try {
-				result = exportedSummaryCallback(data, oldCallback);
-			} catch (e) {
-				console.error('handleSummary() failed with error "' + e + '", falling back to the default summary');
-				result["stdout"] = oldCallback(); // TODO: replace with JS function
-			}
-		} else {
-			result["stdout"] = oldCallback(); // TODO: replace with JS function
-		}
-
-		// TODO: ensure we're returning a map of strings or null/undefined...
-		// and if not, log an error and generate the default summary?
-
-		if (jsonSummaryPath != '') {
-			result[jsonSummaryPath] = oldJSONSummary(data);
-		}
-
-		return result;
-	};
-})();
-`
+//go:embed summary-wrapper.js
+var summaryWrapperLambdaCode string //nolint:gochecknoglobals
 
 // TODO: figure out something saner... refactor the sinks and how we deal with
 // metrics in general... so much pain and misery... :sob:
@@ -157,13 +80,19 @@ func metricValueGetter(summaryTrendStats []string) func(stats.Sink, time.Duratio
 
 // summarizeMetricsToObject transforms the summary objects in a way that's
 // suitable to pass to the JS runtime or export to JSON.
-func summarizeMetricsToObject(data *lib.Summary, options lib.Options) map[string]interface{} {
+func summarizeMetricsToObject(data *lib.Summary, options lib.Options, setupData []byte) map[string]interface{} {
 	m := make(map[string]interface{})
 	m["root_group"] = exportGroup(data.RootGroup)
 	m["options"] = map[string]interface{}{
 		// TODO: improve when we can easily export all option values, including defaults?
 		"summaryTrendStats": options.SummaryTrendStats,
 		"summaryTimeUnit":   options.SummaryTimeUnit.String,
+		"noColor":           data.NoColor, // TODO: move to the (runtime) options
+	}
+	m["state"] = map[string]interface{}{
+		"isStdOutTTY":       data.UIState.IsStdOutTTY,
+		"isStdErrTTY":       data.UIState.IsStdErrTTY,
+		"testRunDurationMs": float64(data.TestRunDuration) / float64(time.Millisecond),
 	}
 
 	getMetricValues := metricValueGetter(options.SummaryTrendStats)
@@ -188,6 +117,18 @@ func summarizeMetricsToObject(data *lib.Summary, options lib.Options) map[string
 		metricsData[name] = metricData
 	}
 	m["metrics"] = metricsData
+
+	var setupDataI interface{}
+	if setupData != nil {
+		if err := json.Unmarshal(setupData, &setupDataI); err != nil {
+			// TODO: log the error
+			return m
+		}
+	} else {
+		setupDataI = goja.Undefined()
+	}
+
+	m["setup_data"] = setupDataI
 
 	return m
 }
@@ -238,26 +179,4 @@ func getSummaryResult(rawResult goja.Value) (map[string]io.Reader, error) {
 	}
 
 	return results, nil
-}
-
-// TODO: remove this after the JS alternative is written
-func getOldTextSummaryFunc(summary *lib.Summary, options lib.Options) func() string {
-	data := ui.SummaryData{
-		Metrics:   summary.Metrics,
-		RootGroup: summary.RootGroup,
-		Time:      summary.TestRunDuration,
-		TimeUnit:  options.SummaryTimeUnit.String,
-	}
-
-	return func() string {
-		buffer := bytes.NewBuffer(nil)
-		_ = buffer.WriteByte('\n')
-
-		s := ui.NewSummary(options.SummaryTrendStats)
-		s.SummarizeMetrics(buffer, " ", data)
-
-		_ = buffer.WriteByte('\n')
-
-		return buffer.String()
-	}
 }

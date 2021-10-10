@@ -26,6 +26,7 @@ import (
 	"os"
 	"syscall"
 
+	"github.com/fatih/color"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
@@ -75,7 +76,8 @@ This will set the default token used when just "k6 run -o cloud" is passed.`,
 
 			// We want to use this fully consolidated config for things like
 			// host addresses, so users can overwrite them with env vars.
-			consolidatedCurrentConfig, err := cloudapi.GetConsolidatedConfig(currentJSONConfigRaw, buildEnvMap(os.Environ()), "")
+			consolidatedCurrentConfig, err := cloudapi.GetConsolidatedConfig(
+				currentJSONConfigRaw, buildEnvMap(os.Environ()), "", nil)
 			if err != nil {
 				return err
 			}
@@ -141,7 +143,8 @@ This will set the default token used when just "k6 run -o cloud" is passed.`,
 			}
 
 			if newCloudConf.Token.Valid {
-				fprintf(stdout, "  token: %s\n", ui.ValueColor.Sprint(newCloudConf.Token.String))
+				valueColor := getColor(noColor || !stdoutTTY, color.FgCyan)
+				fprintf(stdout, "  token: %s\n", valueColor.Sprint(newCloudConf.Token.String))
 			}
 			return nil
 		},
