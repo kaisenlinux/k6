@@ -1,3 +1,9 @@
+k6 (0.35.0-1kaisen) kaisen-packages; urgency=medium
+
+  * Import 0.35.0 release
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Mon, 22 Nov 2021 12:53:42 +0200
+
 k6 (0.34.1-1kaisen) kaisen-packages; urgency=medium
 
   * Import 0.34.1 release

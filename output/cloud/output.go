@@ -142,7 +142,8 @@ func newOutput(params output.Params) (*Output, error) {
 			conf.MaxMetricSamplesPerPackage.Int64)
 	}
 
-	apiClient := cloudapi.NewClient(logger, conf.Token.String, conf.Host.String, consts.Version)
+	apiClient := cloudapi.NewClient(
+		logger, conf.Token.String, conf.Host.String, consts.Version, conf.Timeout.TimeDuration())
 
 	return &Output{
 		config:        conf,
@@ -369,13 +370,13 @@ func (out *Output) AddMetricSamples(sampleContainers []stats.SampleContainer) {
 		case *netext.NetTrail:
 			// TODO: aggregate?
 			values := map[string]float64{
-				metrics.DataSent.Name:     float64(sc.BytesWritten),
-				metrics.DataReceived.Name: float64(sc.BytesRead),
+				metrics.DataSentName:     float64(sc.BytesWritten),
+				metrics.DataReceivedName: float64(sc.BytesRead),
 			}
 
 			if sc.FullIteration {
-				values[metrics.IterationDuration.Name] = stats.D(sc.EndTime.Sub(sc.StartTime))
-				values[metrics.Iterations.Name] = 1
+				values[metrics.IterationDurationName] = stats.D(sc.EndTime.Sub(sc.StartTime))
+				values[metrics.IterationsName] = 1
 			}
 
 			newSamples = append(newSamples, &Sample{

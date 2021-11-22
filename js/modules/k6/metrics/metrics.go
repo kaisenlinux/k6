@@ -23,7 +23,9 @@ package metrics
 import (
 	"errors"
 	"fmt"
-	"regexp"
+	"math"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dop251/goja"
@@ -33,42 +35,32 @@ import (
 	"go.k6.io/k6/stats"
 )
 
-var nameRegexString = "^[\\p{L}\\p{N}\\._ !\\?/&#\\(\\)<>%-]{1,128}$"
-
-var compileNameRegex = regexp.MustCompile(nameRegexString)
-
-func checkName(name string) bool {
-	return compileNameRegex.Match([]byte(name))
-}
-
 type Metric struct {
 	metric *stats.Metric
-	core   modules.InstanceCore
+	vu     modules.VU
 }
 
 // ErrMetricsAddInInitContext is error returned when adding to metric is done in the init context
 var ErrMetricsAddInInitContext = common.NewInitContextError("Adding to metrics in the init context is not supported")
 
 func (mi *ModuleInstance) newMetric(call goja.ConstructorCall, t stats.MetricType) (*goja.Object, error) {
-	if mi.GetInitEnv() == nil {
+	initEnv := mi.vu.InitEnv()
+	if initEnv == nil {
 		return nil, errors.New("metrics must be declared in the init context")
 	}
-	rt := mi.GetRuntime()
+	rt := mi.vu.Runtime()
 	c, _ := goja.AssertFunction(rt.ToValue(func(name string, isTime ...bool) (*goja.Object, error) {
-		// TODO: move verification outside the JS
-		if !checkName(name) {
-			return nil, common.NewInitContextError(fmt.Sprintf("Invalid metric name: '%s'", name))
-		}
-
 		valueType := stats.Default
 		if len(isTime) > 0 && isTime[0] {
 			valueType = stats.Time
 		}
-		m := stats.New(name, t, valueType)
-
-		metric := &Metric{metric: m, core: mi.InstanceCore}
+		m, err := initEnv.Registry.NewMetric(name, t, valueType)
+		if err != nil {
+			return nil, err
+		}
+		metric := &Metric{metric: m, vu: mi.vu}
 		o := rt.NewObject()
-		err := o.DefineDataProperty("name", rt.ToValue(name), goja.FLAG_FALSE, goja.FLAG_FALSE, goja.FLAG_TRUE)
+		err = o.DefineDataProperty("name", rt.ToValue(name), goja.FLAG_FALSE, goja.FLAG_FALSE, goja.FLAG_TRUE)
 		if err != nil {
 			return nil, err
 		}
@@ -85,10 +77,49 @@ func (mi *ModuleInstance) newMetric(call goja.ConstructorCall, t stats.MetricTyp
 	return v.ToObject(rt), nil
 }
 
+const warnMessageValueMaxSize = 100
+
+func limitValue(v string) string {
+	vRunes := []rune(v)
+	if len(vRunes) < warnMessageValueMaxSize {
+		return v
+	}
+	difference := int64(len(vRunes) - warnMessageValueMaxSize)
+	omitMsg := append(strconv.AppendInt([]byte("... omitting "), difference, 10), " characters ..."...)
+	return strings.Join([]string{
+		string(vRunes[:warnMessageValueMaxSize/2]),
+		string(vRunes[len(vRunes)-warnMessageValueMaxSize/2:]),
+	}, string(omitMsg))
+}
+
 func (m Metric) add(v goja.Value, addTags ...map[string]string) (bool, error) {
-	state := m.core.GetState()
+	state := m.vu.State()
 	if state == nil {
 		return false, ErrMetricsAddInInitContext
+	}
+
+	// return/throw exception if throw enabled, otherwise just log
+	raiseNan := func() (bool, error) {
+		err := fmt.Errorf("'%s' is an invalid value for metric '%s', a number or a boolean value is expected",
+			limitValue(v.String()), m.metric.Name)
+		if state.Options.Throw.Bool {
+			return false, err
+		}
+		state.Logger.Warn(err)
+		return false, nil
+	}
+
+	if goja.IsNull(v) {
+		return raiseNan()
+	}
+
+	vfloat := v.ToFloat()
+	if vfloat == 0 && v.ToBoolean() {
+		vfloat = 1.0
+	}
+
+	if math.IsNaN(vfloat) {
+		return raiseNan()
 	}
 
 	tags := state.CloneTags()
@@ -98,13 +129,8 @@ func (m Metric) add(v goja.Value, addTags ...map[string]string) (bool, error) {
 		}
 	}
 
-	vfloat := v.ToFloat()
-	if vfloat == 0 && v.ToBoolean() {
-		vfloat = 1.0
-	}
-
 	sample := stats.Sample{Time: time.Now(), Metric: m.metric, Value: vfloat, Tags: stats.IntoSampleTags(&tags)}
-	stats.PushIfNotDone(m.core.GetContext(), state.Samples, sample)
+	stats.PushIfNotDone(m.vu.Context(), state.Samples, sample)
 	return true, nil
 }
 
@@ -113,18 +139,18 @@ type (
 	RootModule struct{}
 	// ModuleInstance represents an instance of the metrics module
 	ModuleInstance struct {
-		modules.InstanceCore
+		vu modules.VU
 	}
 )
 
 var (
-	_ modules.IsModuleV2 = &RootModule{}
-	_ modules.Instance   = &ModuleInstance{}
+	_ modules.Module   = &RootModule{}
+	_ modules.Instance = &ModuleInstance{}
 )
 
-// NewModuleInstance implements modules.IsModuleV2 interface
-func (*RootModule) NewModuleInstance(m modules.InstanceCore) modules.Instance {
-	return &ModuleInstance{InstanceCore: m}
+// NewModuleInstance implements modules.Module interface
+func (*RootModule) NewModuleInstance(m modules.VU) modules.Instance {
+	return &ModuleInstance{vu: m}
 }
 
 // New returns a new RootModule.
@@ -132,9 +158,16 @@ func New() *RootModule {
 	return &RootModule{}
 }
 
-// GetExports returns the exports of the metrics module
-func (mi *ModuleInstance) GetExports() modules.Exports {
-	return modules.GenerateExports(mi)
+// Exports returns the exports of the metrics module
+func (mi *ModuleInstance) Exports() modules.Exports {
+	return modules.Exports{
+		Named: map[string]interface{}{
+			"Counter": mi.XCounter,
+			"Gauge":   mi.XGauge,
+			"Trend":   mi.XTrend,
+			"Rate":    mi.XRate,
+		},
+	}
 }
 
 // XCounter is a counter constructor

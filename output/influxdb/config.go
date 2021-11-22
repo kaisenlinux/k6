@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/kelseyhightower/envconfig"
-	"github.com/mitchellh/mapstructure"
 	"gopkg.in/guregu/null.v3"
 
 	"go.k6.io/k6/lib/types"
@@ -56,11 +55,20 @@ type Config struct {
 // NewConfig creates a new InfluxDB output config with some default values.
 func NewConfig() Config {
 	c := Config{
-		Addr:             null.NewString("http://localhost:8086", false),
-		DB:               null.NewString("k6", false),
-		TagsAsFields:     []string{"vu", "iter", "url"},
-		ConcurrentWrites: null.NewInt(10, false),
-		PushInterval:     types.NewNullDuration(time.Second, false),
+		Addr:         null.NewString("http://localhost:8086", false),
+		DB:           null.NewString("k6", false),
+		TagsAsFields: []string{"vu", "iter", "url"},
+		PushInterval: types.NewNullDuration(time.Second, false),
+
+		// The minimum value of pow(2, N) for handling a stressful situation
+		// with the default push interval set to 1s.
+		// Concurrency is not expected for the normal use-case,
+		// the response time should be lower than the push interval set value.
+		// In case of spikes, the response time could go around 2s,
+		// higher values will highlight a not sustainable situation
+		// and the user should adjust the executed script
+		// or the configuration based on the environment and rate expected.
+		ConcurrentWrites: null.NewInt(4, false),
 	}
 	return c
 }
@@ -104,24 +112,6 @@ func (c Config) Apply(cfg Config) Config {
 		c.ConcurrentWrites = cfg.ConcurrentWrites
 	}
 	return c
-}
-
-// ParseMap parses a map[string]interface{} into a Config
-func ParseMap(m map[string]interface{}) (Config, error) {
-	c := Config{}
-	if v, ok := m["tagsAsFields"].(string); ok {
-		m["tagsAsFields"] = []string{v}
-	}
-	dec, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
-		DecodeHook: types.NullDecoder,
-		Result:     &c,
-	})
-	if err != nil {
-		return c, err
-	}
-
-	err = dec.Decode(m)
-	return c, err
 }
 
 // ParseJSON parses the supplied JSON into a Config.

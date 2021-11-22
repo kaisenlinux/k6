@@ -22,6 +22,8 @@ package execution
 
 import (
 	"errors"
+	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/dop251/goja"
@@ -38,14 +40,14 @@ type (
 
 	// ModuleInstance represents an instance of the execution module.
 	ModuleInstance struct {
-		modules.InstanceCore
+		vu  modules.VU
 		obj *goja.Object
 	}
 )
 
 var (
-	_ modules.IsModuleV2 = &RootModule{}
-	_ modules.Instance   = &ModuleInstance{}
+	_ modules.Module   = &RootModule{}
+	_ modules.Instance = &ModuleInstance{}
 )
 
 // New returns a pointer to a new RootModule instance.
@@ -53,11 +55,11 @@ func New() *RootModule {
 	return &RootModule{}
 }
 
-// NewModuleInstance implements the modules.IsModuleV2 interface to return
+// NewModuleInstance implements the modules.Module interface to return
 // a new instance for each VU.
-func (*RootModule) NewModuleInstance(m modules.InstanceCore) modules.Instance {
-	mi := &ModuleInstance{InstanceCore: m}
-	rt := m.GetRuntime()
+func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
+	mi := &ModuleInstance{vu: vu}
+	rt := vu.Runtime()
 	o := rt.NewObject()
 	defProp := func(name string, newInfo func() (*goja.Object, error)) {
 		err := o.DefineAccessorProperty(name, rt.ToValue(func() goja.Value {
@@ -80,17 +82,17 @@ func (*RootModule) NewModuleInstance(m modules.InstanceCore) modules.Instance {
 	return mi
 }
 
-// GetExports returns the exports of the execution module.
-func (mi *ModuleInstance) GetExports() modules.Exports {
+// Exports returns the exports of the execution module.
+func (mi *ModuleInstance) Exports() modules.Exports {
 	return modules.Exports{Default: mi.obj}
 }
 
 // newScenarioInfo returns a goja.Object with property accessors to retrieve
 // information about the scenario the current VU is running in.
 func (mi *ModuleInstance) newScenarioInfo() (*goja.Object, error) {
-	ctx := mi.GetContext()
+	ctx := mi.vu.Context()
 	rt := common.GetRuntime(ctx)
-	vuState := mi.GetState()
+	vuState := mi.vu.State()
 	if vuState == nil {
 		return nil, errors.New("getting scenario information in the init context is not supported")
 	}
@@ -98,7 +100,7 @@ func (mi *ModuleInstance) newScenarioInfo() (*goja.Object, error) {
 		return nil, errors.New("goja runtime is nil in context")
 	}
 	getScenarioState := func() *lib.ScenarioState {
-		ss := lib.GetScenarioState(mi.GetContext())
+		ss := lib.GetScenarioState(mi.vu.Context())
 		if ss == nil {
 			common.Throw(rt, errors.New("getting scenario information in the init context is not supported"))
 		}
@@ -138,7 +140,7 @@ func (mi *ModuleInstance) newScenarioInfo() (*goja.Object, error) {
 // newInstanceInfo returns a goja.Object with property accessors to retrieve
 // information about the local instance stats.
 func (mi *ModuleInstance) newInstanceInfo() (*goja.Object, error) {
-	ctx := mi.GetContext()
+	ctx := mi.vu.Context()
 	es := lib.GetExecutionState(ctx)
 	if es == nil {
 		return nil, errors.New("getting instance information in the init context is not supported")
@@ -173,7 +175,7 @@ func (mi *ModuleInstance) newInstanceInfo() (*goja.Object, error) {
 // newVUInfo returns a goja.Object with property accessors to retrieve
 // information about the currently executing VU.
 func (mi *ModuleInstance) newVUInfo() (*goja.Object, error) {
-	ctx := mi.GetContext()
+	ctx := mi.vu.Context()
 	vuState := lib.GetState(ctx)
 	if vuState == nil {
 		return nil, errors.New("getting VU information in the init context is not supported")
@@ -193,7 +195,16 @@ func (mi *ModuleInstance) newVUInfo() (*goja.Object, error) {
 		},
 	}
 
-	return newInfoObj(rt, vi)
+	o, err := newInfoObj(rt, vi)
+	if err != nil {
+		return o, err
+	}
+
+	err = o.Set("tags", rt.NewDynamicObject(&tagsDynamicObject{
+		Runtime: rt,
+		State:   vuState,
+	}))
+	return o, err
 }
 
 func newInfoObj(rt *goja.Runtime, props map[string]func() interface{}) (*goja.Object, error) {
@@ -207,4 +218,70 @@ func newInfoObj(rt *goja.Runtime, props map[string]func() interface{}) (*goja.Ob
 	}
 
 	return o, nil
+}
+
+type tagsDynamicObject struct {
+	Runtime *goja.Runtime
+	State   *lib.State
+}
+
+// Get a property value for the key. May return nil if the property does not exist.
+func (o *tagsDynamicObject) Get(key string) goja.Value {
+	tag, ok := o.State.Tags.Get(key)
+	if !ok {
+		return nil
+	}
+	return o.Runtime.ToValue(tag)
+}
+
+// Set a property value for the key. It returns true if succeed.
+// String, Boolean and Number types are implicitly converted
+// to the goja's relative string representation.
+// In any other case, if the Throw option is set then an error is raised
+// otherwise just a Warning is written.
+func (o *tagsDynamicObject) Set(key string, val goja.Value) bool {
+	switch val.ExportType().Kind() { //nolint:exhaustive
+	case
+		reflect.String,
+		reflect.Bool,
+		reflect.Int64,
+		reflect.Float64:
+
+		o.State.Tags.Set(key, val.String())
+		return true
+	default:
+		err := fmt.Errorf("only String, Boolean and Number types are accepted as a Tag value")
+		if o.State.Options.Throw.Bool {
+			common.Throw(o.Runtime, err)
+			return false
+		}
+		o.State.Logger.Warnf("the execution.vu.tags.Set('%s') operation has been discarded because %s", key, err.Error())
+		return false
+	}
+}
+
+// Has returns true if the property exists.
+func (o *tagsDynamicObject) Has(key string) bool {
+	_, ok := o.State.Tags.Get(key)
+	return ok
+}
+
+// Delete deletes the property for the key. It returns true on success (note, that includes missing property).
+func (o *tagsDynamicObject) Delete(key string) bool {
+	o.State.Tags.Delete(key)
+	return true
+}
+
+// Keys returns a slice with all existing property keys. The order is not deterministic.
+func (o *tagsDynamicObject) Keys() []string {
+	if o.State.Tags.Len() < 1 {
+		return nil
+	}
+
+	tags := o.State.Tags.Clone()
+	keys := make([]string, 0, len(tags))
+	for k := range tags {
+		keys = append(keys, k)
+	}
+	return keys
 }
