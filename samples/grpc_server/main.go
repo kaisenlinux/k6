@@ -45,6 +45,13 @@ import (
 	"google.golang.org/grpc/reflection"
 )
 
+// It generates the Go code for protobuf and the gRPC server used by this implementation. Check the following links for getting more details about protoc generation:
+// * https://grpc.io/docs/protoc-installation
+// * https://grpc.io/docs/languages/go/quickstart/
+//
+//
+//go:generate protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative route_guide.proto
+
 func init() {
 	rand.Seed(time.Now().UnixNano())
 }
@@ -57,16 +64,17 @@ var (
 	port       = flag.Int("port", 10000, "The server port")
 )
 
-type routeGuideServer struct {
-	UnimplementedRouteGuideServer
+type featureExplorerServer struct {
+	UnimplementedFeatureExplorerServer
 	savedFeatures []*Feature // read-only after initialized
+}
 
-	mu         sync.Mutex // protects routeNotes
-	routeNotes map[string][]*RouteNote
+func newFeatureExplorerServer(features ...*Feature) *featureExplorerServer {
+	return &featureExplorerServer{savedFeatures: features}
 }
 
 // GetFeature returns the feature at the given point.
-func (s *routeGuideServer) GetFeature(ctx context.Context, point *Point) (*Feature, error) {
+func (s *featureExplorerServer) GetFeature(ctx context.Context, point *Point) (*Feature, error) {
 	n := rand.Intn(1000)
 	time.Sleep(time.Duration(n) * time.Millisecond)
 
@@ -80,7 +88,7 @@ func (s *routeGuideServer) GetFeature(ctx context.Context, point *Point) (*Featu
 }
 
 // ListFeatures lists all features contained within the given bounding Rectangle.
-func (s *routeGuideServer) ListFeatures(rect *Rectangle, stream RouteGuide_ListFeaturesServer) error {
+func (s *featureExplorerServer) ListFeatures(rect *Rectangle, stream FeatureExplorer_ListFeaturesServer) error {
 	for _, feature := range s.savedFeatures {
 		if inRange(feature.Location, rect) {
 			time.Sleep(500 * time.Millisecond)
@@ -90,6 +98,22 @@ func (s *routeGuideServer) ListFeatures(rect *Rectangle, stream RouteGuide_ListF
 		}
 	}
 	return nil
+}
+
+type routeGuideServer struct {
+	UnimplementedRouteGuideServer
+	savedFeatures []*Feature // read-only after initialized
+
+	mu         sync.Mutex // protects routeNotes
+	routeNotes map[string][]*RouteNote
+}
+
+func newRouteGuideServer(features ...*Feature) *routeGuideServer {
+	s := &routeGuideServer{
+		savedFeatures: features,
+		routeNotes:    make(map[string][]*RouteNote),
+	}
+	return s
 }
 
 // RecordRoute records a route composited of a sequence of points.
@@ -159,7 +183,7 @@ func (s *routeGuideServer) RouteChat(stream RouteGuide_RouteChatServer) error {
 }
 
 // loadFeatures loads features from a JSON file.
-func (s *routeGuideServer) loadFeatures(filePath string) {
+func loadFeatures(filePath string) []*Feature {
 	var data []byte
 	if filePath != "" {
 		var err error
@@ -170,9 +194,11 @@ func (s *routeGuideServer) loadFeatures(filePath string) {
 	} else {
 		data = exampleData
 	}
-	if err := json.Unmarshal(data, &s.savedFeatures); err != nil {
+	var features []*Feature
+	if err := json.Unmarshal(data, &features); err != nil {
 		log.Fatalf("Failed to load default features: %v", err)
 	}
+	return features
 }
 
 func toRadians(num float64) float64 {
@@ -219,12 +245,6 @@ func serialize(point *Point) string {
 	return fmt.Sprintf("%d %d", point.Latitude, point.Longitude)
 }
 
-func newServer() *routeGuideServer {
-	s := &routeGuideServer{routeNotes: make(map[string][]*RouteNote)}
-	s.loadFeatures(*jsonDBFile)
-	return s
-}
-
 func main() {
 	flag.Parse()
 	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", *port))
@@ -245,8 +265,10 @@ func main() {
 		}
 		opts = []grpc.ServerOption{grpc.Creds(creds)}
 	}
+	features := loadFeatures(*jsonDBFile)
 	grpcServer := grpc.NewServer(opts...)
-	RegisterRouteGuideServer(grpcServer, newServer())
+	RegisterRouteGuideServer(grpcServer, newRouteGuideServer(features...))
+	RegisterFeatureExplorerServer(grpcServer, newFeatureExplorerServer(features...))
 	reflection.Register(grpcServer)
 	grpcServer.Serve(lis)
 }

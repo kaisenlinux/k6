@@ -55,6 +55,7 @@ import (
 	"go.k6.io/k6/js/modules/k6/ws"
 	"go.k6.io/k6/lib"
 	_ "go.k6.io/k6/lib/executor" // TODO: figure out something better
+	"go.k6.io/k6/lib/fsext"
 	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/lib/testutils/httpmultibin"
@@ -359,15 +360,15 @@ func testSetupDataHelper(t *testing.T, data string) {
 		r := r
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			samples := make(chan stats.SampleContainer, 100)
 
-			if !assert.NoError(t, r.Setup(context.Background(), samples)) {
+			if !assert.NoError(t, r.Setup(ctx, samples)) {
 				return
 			}
 			initVU, err := r.NewVU(1, 1, samples)
 			if assert.NoError(t, err) {
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
 				vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 				err := vu.RunOnce()
 				assert.NoError(t, err)
@@ -947,7 +948,10 @@ func TestVUIntegrationBlockHostnamesOption(t *testing.T) {
 			t.Parallel()
 			initVu, err := r.NewVU(1, 1, make(chan stats.SampleContainer, 100))
 			require.NoError(t, err)
-			vu := initVu.Activate(&lib.VUActivationParams{RunContext: context.Background()})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			vu := initVu.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = vu.RunOnce()
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "hostname (k6.io) is in a blocked pattern (*.io)")
@@ -982,7 +986,9 @@ func TestVUIntegrationBlockHostnamesScript(t *testing.T) {
 			t.Parallel()
 			initVu, err := r.NewVU(0, 0, make(chan stats.SampleContainer, 100))
 			require.NoError(t, err)
-			vu := initVu.Activate(&lib.VUActivationParams{RunContext: context.Background()})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			vu := initVu.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = vu.RunOnce()
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "hostname (k6.io) is in a blocked pattern (*.io)")
@@ -1150,6 +1156,79 @@ func TestVUIntegrationOpenFunctionErrorWhenSneaky(t *testing.T) {
 	err = vu.RunOnce()
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "only available in the init stage")
+}
+
+func TestVUDoesOpenUnderV0Condition(t *testing.T) {
+	t.Parallel()
+
+	baseFS := afero.NewMemMapFs()
+	data := `
+			if (__VU == 0) {
+				let data = open("/home/somebody/test.json");
+			}
+			exports.default = function() {
+				console.log("hey")
+			}
+		`
+	require.NoError(t, afero.WriteFile(baseFS, "/home/somebody/test.json", []byte(`42`), os.ModePerm))
+	require.NoError(t, afero.WriteFile(baseFS, "/script.js", []byte(data), os.ModePerm))
+
+	fs := fsext.NewCacheOnReadFs(baseFS, afero.NewMemMapFs(), 0)
+
+	r, err := getSimpleRunner(t, "/script.js", data, fs)
+	require.NoError(t, err)
+
+	_, err = r.NewVU(1, 1, make(chan stats.SampleContainer, 100))
+	assert.NoError(t, err)
+}
+
+func TestVUDoesNotOpenUnderConditions(t *testing.T) {
+	t.Parallel()
+
+	baseFS := afero.NewMemMapFs()
+	data := `
+			if (__VU > 0) {
+				let data = open("/home/somebody/test.json");
+			}
+			exports.default = function() {
+				console.log("hey")
+			}
+		`
+	require.NoError(t, afero.WriteFile(baseFS, "/home/somebody/test.json", []byte(`42`), os.ModePerm))
+	require.NoError(t, afero.WriteFile(baseFS, "/script.js", []byte(data), os.ModePerm))
+
+	fs := fsext.NewCacheOnReadFs(baseFS, afero.NewMemMapFs(), 0)
+
+	r, err := getSimpleRunner(t, "/script.js", data, fs)
+	require.NoError(t, err)
+
+	_, err = r.NewVU(1, 1, make(chan stats.SampleContainer, 100))
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "open() can't be used with files that weren't previously opened during initialization (__VU==0)")
+}
+
+func TestVUDoesNonExistingPathnUnderConditions(t *testing.T) {
+	t.Parallel()
+
+	baseFS := afero.NewMemMapFs()
+	data := `
+			if (__VU == 1) {
+				let data = open("/home/nobody");
+			}
+			exports.default = function() {
+				console.log("hey")
+			}
+		`
+	require.NoError(t, afero.WriteFile(baseFS, "/script.js", []byte(data), os.ModePerm))
+
+	fs := fsext.NewCacheOnReadFs(baseFS, afero.NewMemMapFs(), 0)
+
+	r, err := getSimpleRunner(t, "/script.js", data, fs)
+	require.NoError(t, err)
+
+	_, err = r.NewVU(1, 1, make(chan stats.SampleContainer, 100))
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "open() can't be used with files that weren't previously opened during initialization (__VU==0)")
 }
 
 func TestVUIntegrationCookiesReset(t *testing.T) {
@@ -1501,6 +1580,13 @@ func TestInitContextForbidden(t *testing.T) {
 			k6.ErrCheckInInitContext.Error(),
 		},
 		{
+			"abortTest",
+			`var test = require("k6/execution").test;
+			 test.abort();
+			 exports.default = function() { console.log("p"); }`,
+			common.AbortTest,
+		},
+		{
 			"group",
 			`var group = require("k6").group;
 			 group("group1", function () { console.log("group1");})
@@ -1585,11 +1671,14 @@ func TestArchiveRunningIntegrity(t *testing.T) {
 			t.Parallel()
 			var err error
 			ch := make(chan stats.SampleContainer, 100)
-			err = r.Setup(context.Background(), ch)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			err = r.Setup(ctx, ch)
+			cancel()
 			require.NoError(t, err)
 			initVU, err := r.NewVU(1, 1, ch)
 			require.NoError(t, err)
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel = context.WithCancel(context.Background())
 			defer cancel()
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = vu.RunOnce()
@@ -1755,6 +1844,8 @@ func TestSystemTags(t *testing.T) {
 		num, tc := num, tc
 		t.Run(fmt.Sprintf("TC %d with only %s", num, tc.tag), func(t *testing.T) {
 			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			samples := make(chan stats.SampleContainer, 100)
 			r, err := getSimpleRunner(t, "/script.js", tb.Replacer.Replace(`
 				var http = require("k6/http");
@@ -1781,7 +1872,7 @@ func TestSystemTags(t *testing.T) {
 			vu, err := r.NewVU(uint64(num), 0, samples)
 			require.NoError(t, err)
 			activeVU := vu.Activate(&lib.VUActivationParams{
-				RunContext: context.Background(),
+				RunContext: ctx,
 				Exec:       tc.exec,
 				Scenario:   "default",
 			})
@@ -1972,9 +2063,13 @@ func TestComplicatedFileImportsForGRPC(t *testing.T) {
 
 			exports.default = function() {
 				client.connect('GRPCBIN_ADDR', {timeout: '3s'});
-				var resp = client.invoke('grpc.testing.TestService/UnaryCall', {})
-				if (!resp.message || resp.error || resp.message.username !== 'foo') {
-					throw new Error('unexpected response message: ' + JSON.stringify(resp.message))
+				try {
+					var resp = client.invoke('grpc.testing.TestService/UnaryCall', {})
+					if (!resp.message || resp.error || resp.message.username !== 'foo') {
+						throw new Error('unexpected response message: ' + JSON.stringify(resp.message))
+					}
+				} finally {
+					client.close();
 				}
 			}
 		`, loadCode))
@@ -2071,6 +2166,88 @@ func TestMinIterationDurationIsCancellable(t *testing.T) {
 		t.Fatal("Test timed out or minIterationDuration prevailed")
 	case err := <-errC:
 		require.NoError(t, err)
+	}
+}
+
+// nolint:paralleltest
+func TestForceHTTP1Feature(t *testing.T) {
+	cases := map[string]struct {
+		godebug               string
+		expectedForceH1Result bool
+		protocol              string
+	}{
+		"Force H1 Enabled. Checking for H1": {
+			godebug:               "http2client=0,gctrace=1",
+			expectedForceH1Result: true,
+			protocol:              "HTTP/1.1",
+		},
+		"Force H1 Disabled. Checking for H2": {
+			godebug:               "test=0",
+			expectedForceH1Result: false,
+			protocol:              "HTTP/2.0",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := os.Setenv("GODEBUG", tc.godebug)
+			require.NoError(t, err)
+			defer func() {
+				err = os.Unsetenv("GODEBUG")
+				require.NoError(t, err)
+			}()
+			assert.Equal(t, tc.expectedForceH1Result, forceHTTP1())
+
+			tb := httpmultibin.NewHTTPMultiBin(t)
+
+			data := fmt.Sprintf(`var k6 = require("k6");
+			var check = k6.check;
+			var fail = k6.fail;
+			var http = require("k6/http");;
+			exports.default = function() {
+				var res = http.get("HTTP2BIN_URL");
+				if (
+					!check(res, {
+					'checking to see if status was 200': (res) => res.status === 200,
+					'checking to see protocol': (res) => res.proto === '%s'
+					})
+				) {
+					fail('test failed')
+				}
+			}`, tc.protocol)
+
+			r1, err := getSimpleRunner(t, "/script.js", tb.Replacer.Replace(data))
+			require.NoError(t, err)
+
+			err = r1.SetOptions(lib.Options{
+				Hosts: tb.Dialer.Hosts,
+				// We disable TLS verify so that we don't get a TLS handshake error since
+				// the certificates on the endpoint are not certified by a certificate authority
+				InsecureSkipTLSVerify: null.BoolFrom(true),
+			})
+
+			require.NoError(t, err)
+
+			registry := metrics.NewRegistry()
+			builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
+			r2, err := NewFromArchive(testutils.NewLogger(t), r1.MakeArchive(), lib.RuntimeOptions{}, builtinMetrics, registry)
+			require.NoError(t, err)
+
+			runners := map[string]*Runner{"Source": r1, "Archive": r2}
+			for name, r := range runners {
+				r := r
+				t.Run(name, func(t *testing.T) {
+					initVU, err := r.NewVU(1, 1, make(chan stats.SampleContainer, 100))
+					require.NoError(t, err)
+
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
+					err = vu.RunOnce()
+					require.NoError(t, err)
+				})
+			}
+		})
 	}
 }
 

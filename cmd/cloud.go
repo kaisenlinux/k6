@@ -46,7 +46,6 @@ import (
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/consts"
 	"go.k6.io/k6/lib/metrics"
-	"go.k6.io/k6/loader"
 	"go.k6.io/k6/ui/pb"
 )
 
@@ -90,14 +89,8 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 			printBar(progressBar)
 
 			// Runner
-			pwd, err := os.Getwd()
-			if err != nil {
-				return err
-			}
-
 			filename := args[0]
-			filesystems := loader.CreateFilesystems()
-			src, err := loader.ReadSource(logger, filename, pwd, filesystems, os.Stdin)
+			src, filesystems, err := readSource(filename, logger)
 			if err != nil {
 				return err
 			}
@@ -121,7 +114,7 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 			if err != nil {
 				return err
 			}
-			conf, err := getConsolidatedConfig(afero.NewOsFs(), Config{Options: cliOpts}, r)
+			conf, err := getConsolidatedConfig(afero.NewOsFs(), Config{Options: cliOpts}, r.GetOptions())
 			if err != nil {
 				return err
 			}

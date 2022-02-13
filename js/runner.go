@@ -31,6 +31,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -85,7 +86,7 @@ func New(
 		return nil, err
 	}
 
-	return newFromBundle(logger, bundle, builtinMetrics, registry)
+	return NewFromBundle(logger, bundle, builtinMetrics, registry)
 }
 
 // NewFromArchive returns a new Runner from the source in the provided archive
@@ -98,10 +99,11 @@ func NewFromArchive(
 		return nil, err
 	}
 
-	return newFromBundle(logger, bundle, builtinMetrics, registry)
+	return NewFromBundle(logger, bundle, builtinMetrics, registry)
 }
 
-func newFromBundle(
+// NewFromBundle returns a new Runner from the provided Bundle
+func NewFromBundle(
 	logger *logrus.Logger, b *Bundle, builtinMetrics *metrics.BuiltinMetrics, registry *metrics.Registry,
 ) (*Runner, error) {
 	defaultGroup, err := lib.NewGroup("", nil)
@@ -210,7 +212,12 @@ func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- stats.SampleC
 		MaxIdleConns:        int(r.Bundle.Options.Batch.Int64),
 		MaxIdleConnsPerHost: int(r.Bundle.Options.BatchPerHost.Int64),
 	}
-	_ = http2.ConfigureTransport(transport)
+
+	if forceHTTP1() {
+		transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper) // send over h1 protocol
+	} else {
+		_ = http2.ConfigureTransport(transport) // send over h2 protocol
+	}
 
 	cookieJar, err := cookiejar.New(nil)
 	if err != nil {
@@ -260,6 +267,23 @@ func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- stats.SampleC
 	})
 
 	return vu, nil
+}
+
+// forceHTTP1 checks if force http1 env variable has been set in order to force requests to be sent over h1
+// TODO: This feature is temporary until #936 is resolved
+func forceHTTP1() bool {
+	godebug := os.Getenv("GODEBUG")
+	if godebug == "" {
+		return false
+	}
+	variables := strings.SplitAfter(godebug, ",")
+
+	for _, v := range variables {
+		if strings.Trim(v, ",") == "http2client=0" {
+			return true
+		}
+	}
+	return false
 }
 
 // Setup runs the setup function if there is one and sets the setupData to the returned value
@@ -529,9 +553,9 @@ func (r *Runner) getTimeoutFor(stage string) time.Duration {
 	d := time.Duration(0)
 	switch stage {
 	case consts.SetupFn:
-		return time.Duration(r.Bundle.Options.SetupTimeout.Duration)
+		return r.Bundle.Options.SetupTimeout.TimeDuration()
 	case consts.TeardownFn:
-		return time.Duration(r.Bundle.Options.TeardownTimeout.Duration)
+		return r.Bundle.Options.TeardownTimeout.TimeDuration()
 	case consts.HandleSummaryFn:
 		return 2 * time.Minute // TODO: make configurable
 	}
@@ -703,11 +727,20 @@ func (u *ActiveVU) RunOnce() error {
 
 	// Call the exported function.
 	_, isFullIteration, totalTime, err := u.runFn(u.RunContext, true, fn, u.setupData)
+	if err != nil {
+		var x *goja.InterruptedError
+		if errors.As(err, &x) {
+			if v, ok := x.Value().(*common.InterruptError); ok {
+				v.Reason = x.Error()
+				err = v
+			}
+		}
+	}
 
 	// If MinIterationDuration is specified and the iteration wasn't canceled
 	// and was less than it, sleep for the remainder
 	if isFullIteration && u.Runner.Bundle.Options.MinIterationDuration.Valid {
-		durationDiff := time.Duration(u.Runner.Bundle.Options.MinIterationDuration.Duration) - totalTime
+		durationDiff := u.Runner.Bundle.Options.MinIterationDuration.TimeDuration() - totalTime
 		if durationDiff > 0 {
 			select {
 			case <-time.After(durationDiff):

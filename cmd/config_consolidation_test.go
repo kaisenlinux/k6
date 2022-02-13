@@ -241,7 +241,7 @@ func getConfigConsolidationTestCases() []configConsolidationTestCase {
 		{opts{cli: []string{"-u", "1", "-i", "6", "-d", "10s"}}, exp{}, func(t *testing.T, c Config) {
 			verifySharedIters(I(1), I(6))(t, c)
 			sharedIterConfig := c.Scenarios[lib.DefaultScenarioName].(executor.SharedIterationsConfig)
-			assert.Equal(t, time.Duration(sharedIterConfig.MaxDuration.Duration), 10*time.Second)
+			assert.Equal(t, sharedIterConfig.MaxDuration.TimeDuration(), 10*time.Second)
 		}},
 		// This should get a validation error since VUs are more than the shared iterations
 		{opts{cli: []string{"--vus", "10", "-i", "6"}}, exp{validationErrors: true}, verifySharedIters(I(10), I(6))},
@@ -569,16 +569,18 @@ func runTestCase(
 	}
 	require.NoError(t, cliErr)
 
-	var runner lib.Runner
+	var runnerOpts lib.Options
 	if testCase.options.runner != nil {
-		runner = &minirunner.MiniRunner{Options: *testCase.options.runner}
+		runnerOpts = minirunner.MiniRunner{Options: *testCase.options.runner}.GetOptions()
 	}
+	// without runner creation, values in runnerOpts will simply be invalid
+
 	if testCase.options.fs == nil {
 		t.Logf("Creating an empty FS for this test")
 		testCase.options.fs = afero.NewMemMapFs() // create an empty FS if it wasn't supplied
 	}
 
-	consolidatedConfig, err := getConsolidatedConfig(testCase.options.fs, cliConf, runner)
+	consolidatedConfig, err := getConsolidatedConfig(testCase.options.fs, cliConf, runnerOpts)
 	if testCase.expected.consolidationError {
 		require.Error(t, err)
 		return

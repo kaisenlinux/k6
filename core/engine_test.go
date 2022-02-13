@@ -411,7 +411,7 @@ func getMetricMax(mo *mockoutput.MockOutput, name string) (result float64) {
 	return
 }
 
-const expectedHeaderMaxLength = 500
+const expectedHeaderMaxLength = 550
 
 // FIXME: This test is too brittle, consider simplifying.
 func TestSentReceivedMetrics(t *testing.T) {
@@ -430,6 +430,9 @@ func TestSentReceivedMetrics(t *testing.T) {
 			export default function() {
 				http.get("HTTPBIN_URL/bytes/15000");
 			}`), 1, 0, 15000},
+		// NOTE: This needs to be improved, in the case of HTTPS IN URL
+		// it's highly possible to meet the case when data received is out
+		// of in the possible interval
 		{tr(`import http from "k6/http";
 			export default function() {
 				http.get("HTTPBIN_URL/bytes/5000");
@@ -783,8 +786,8 @@ func TestSetupException(t *testing.T) {
 		require.Error(t, err)
 		var exception errext.Exception
 		require.ErrorAs(t, err, &exception)
-		require.Equal(t, "Error: baz\n\tat baz (file:///bar.js:7:8(4))\n"+
-			"\tat file:///bar.js:4:5(3)\n\tat setup (file:///script.js:7:204(4))\n",
+		require.Equal(t, "Error: baz\n\tat baz (file:///bar.js:6:16(3))\n"+
+			"\tat file:///bar.js:3:8(3)\n\tat setup (file:///script.js:4:2(4))\n\tat native\n",
 			err.Error())
 	}
 }
@@ -835,7 +838,7 @@ func TestVuInitException(t *testing.T) {
 
 	var exception errext.Exception
 	require.ErrorAs(t, err, &exception)
-	assert.Equal(t, "Error: oops in 2\n\tat file:///script.js:10:8(32)\n", err.Error())
+	assert.Equal(t, "Error: oops in 2\n\tat file:///script.js:10:9(31)\n", err.Error())
 
 	var errWithHint errext.HasHint
 	require.ErrorAs(t, err, &errWithHint)

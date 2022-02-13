@@ -137,7 +137,7 @@ func TestInitContextRequire(t *testing.T) {
 			fs := afero.NewMemMapFs()
 			assert.NoError(t, afero.WriteFile(fs, "/file.js", []byte(`throw new Error("aaaa")`), 0o755))
 			_, err := getSimpleBundle(t, "/script.js", `import "/file.js"; export default function() {}`, fs)
-			assert.EqualError(t, err, "Error: aaaa\n\tat file:///file.js:2:7(4)\n\tat reflect.methodValueCall (native)\n\tat file:///script.js:1:117(14)\n")
+			assert.EqualError(t, err, "Error: aaaa\n\tat file:///file.js:2:7(3)\n\tat reflect.methodValueCall (native)\n\tat file:///script.js:1:0(14)\n")
 		})
 
 		imports := map[string]struct {
@@ -409,7 +409,8 @@ func TestRequestWithBinaryFile(t *testing.T) {
 		Tags:           lib.NewTagMap(nil),
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	ctx = lib.WithState(ctx, state)
 	ctx = common.WithRuntime(ctx, bi.Runtime)
 	*bi.Context = ctx
@@ -557,7 +558,8 @@ func TestRequestWithMultipleBinaryFiles(t *testing.T) {
 		Tags:           lib.NewTagMap(nil),
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	ctx = lib.WithState(ctx, state)
 	ctx = common.WithRuntime(ctx, bi.Runtime)
 	*bi.Context = ctx
@@ -582,4 +584,135 @@ func TestInitContextVU(t *testing.T) {
 	v, err := bi.exports[consts.DefaultFn](goja.Undefined())
 	require.NoError(t, err)
 	assert.Equal(t, int64(5), v.Export())
+}
+
+func TestSourceMaps(t *testing.T) {
+	t.Parallel()
+	logger := testutils.NewLogger(t)
+	fs := afero.NewMemMapFs()
+	assert.NoError(t, afero.WriteFile(fs, "/module1.js", []byte(`
+export function f2(){
+    throw "exception in line 2"
+    console.log("in f2")
+}
+export function f1(){
+    throw "exception in line 6"
+    console.log("in f1")
+}
+`[1:]), 0o644))
+	data := `
+import * as module1 from "./module1.js"
+
+export default function(){
+//    throw "exception in line 4"
+    module1.f2()
+    console.log("in default")
+}
+`[1:]
+	b, err := getSimpleBundle(t, "/script.js", data, fs)
+	require.NoError(t, err)
+
+	bi, err := b.Instantiate(logger, 0)
+	require.NoError(t, err)
+	_, err = bi.exports[consts.DefaultFn](goja.Undefined())
+	require.Error(t, err)
+	exception := new(goja.Exception)
+	require.ErrorAs(t, err, &exception)
+	require.Equal(t, exception.String(), "exception in line 2\n\tat f2 (file:///module1.js:2:4(2))\n\tat file:///script.js:5:4(4)\n\tat native\n")
+}
+
+func TestSourceMapsExternal(t *testing.T) {
+	t.Parallel()
+	logger := testutils.NewLogger(t)
+	fs := afero.NewMemMapFs()
+	// This example is created through the template-typescript
+	assert.NoError(t, afero.WriteFile(fs, "/test1.js", []byte(`
+(()=>{"use strict";var e={};(()=>{var o=e;Object.defineProperty(o,"__esModule",{value:!0}),o.default=function(){!function(e){throw"cool is cool"}()}})();var o=exports;for(var r in e)o[r]=e[r];e.__esModule&&Object.defineProperty(o,"__esModule",{value:!0})})();
+//# sourceMappingURL=test1.js.map
+`[1:]), 0o644))
+	assert.NoError(t, afero.WriteFile(fs, "/test1.js.map", []byte(`
+{"version":3,"sources":["webpack:///./test1.ts"],"names":["s","coolThrow"],"mappings":"2FAGA,sBAHA,SAAmBA,GACf,KAAM,eAGNC,K","file":"test1.js","sourcesContent":["function coolThrow(s: string) {\n    throw \"cool \"+ s\n}\nexport default () => {\n    coolThrow(\"is cool\")\n};\n"],"sourceRoot":""}
+`[1:]), 0o644))
+	data := `
+import l from "./test1.js"
+
+export default function () {
+		l()
+};
+`[1:]
+	b, err := getSimpleBundle(t, "/script.js", data, fs)
+	require.NoError(t, err)
+
+	bi, err := b.Instantiate(logger, 0)
+	require.NoError(t, err)
+	_, err = bi.exports[consts.DefaultFn](goja.Undefined())
+	require.Error(t, err)
+	exception := new(goja.Exception)
+	require.ErrorAs(t, err, &exception)
+	require.Equal(t, "cool is cool\n\tat webpack:///./test1.ts:2:4(2)\n\tat webpack:///./test1.ts:5:4(3)\n\tat file:///script.js:4:2(4)\n\tat native\n", exception.String())
+}
+
+func TestSourceMapsExternalExtented(t *testing.T) {
+	t.Parallel()
+	logger := testutils.NewLogger(t)
+	fs := afero.NewMemMapFs()
+	// This example is created through the template-typescript
+	// but was exported to use import/export syntax so it has to go through babel
+	assert.NoError(t, afero.WriteFile(fs, "/test1.js", []byte(`
+var o={d:(e,r)=>{for(var t in r)o.o(r,t)&&!o.o(e,t)&&Object.defineProperty(e,t,{enumerable:!0,get:r[t]})},o:(o,e)=>Object.prototype.hasOwnProperty.call(o,e)},e={};o.d(e,{Z:()=>r});const r=()=>{!function(o){throw"cool is cool"}()};var t=e.Z;export{t as default};
+//# sourceMappingURL=test1.js.map
+`[1:]), 0o644))
+	assert.NoError(t, afero.WriteFile(fs, "/test1.js.map", []byte(`
+{"version":3,"sources":["webpack:///webpack/bootstrap","webpack:///webpack/runtime/define property getters","webpack:///webpack/runtime/hasOwnProperty shorthand","webpack:///./test1.ts"],"names":["__webpack_require__","exports","definition","key","o","Object","defineProperty","enumerable","get","obj","prop","prototype","hasOwnProperty","call","s","coolThrow"],"mappings":"AACA,IAAIA,EAAsB,CCA1B,EAAwB,CAACC,EAASC,KACjC,IAAI,IAAIC,KAAOD,EACXF,EAAoBI,EAAEF,EAAYC,KAASH,EAAoBI,EAAEH,EAASE,IAC5EE,OAAOC,eAAeL,EAASE,EAAK,CAAEI,YAAY,EAAMC,IAAKN,EAAWC,MCJ3E,EAAwB,CAACM,EAAKC,IAAUL,OAAOM,UAAUC,eAAeC,KAAKJ,EAAKC,I,sBCGlF,cAHA,SAAmBI,GACf,KAAM,eAGNC,I","file":"test1.js","sourcesContent":["// The require scope\nvar __webpack_require__ = {};\n\n","// define getter functions for harmony exports\n__webpack_require__.d = (exports, definition) => {\n\tfor(var key in definition) {\n\t\tif(__webpack_require__.o(definition, key) && !__webpack_require__.o(exports, key)) {\n\t\t\tObject.defineProperty(exports, key, { enumerable: true, get: definition[key] });\n\t\t}\n\t}\n};","__webpack_require__.o = (obj, prop) => (Object.prototype.hasOwnProperty.call(obj, prop))","function coolThrow(s: string) {\n    throw \"cool \"+ s\n}\nexport default () => {\n    coolThrow(\"is cool\")\n};\n"],"sourceRoot":""}
+`[1:]), 0o644))
+	data := `
+import l from "./test1.js"
+
+export default function () {
+		l()
+};
+`[1:]
+	b, err := getSimpleBundle(t, "/script.js", data, fs)
+	require.NoError(t, err)
+
+	bi, err := b.Instantiate(logger, 0)
+	require.NoError(t, err)
+	_, err = bi.exports[consts.DefaultFn](goja.Undefined())
+	require.Error(t, err)
+	exception := new(goja.Exception)
+	require.ErrorAs(t, err, &exception)
+	// TODO figure out why those are not the same as the one in the previous test TestSourceMapsExternal
+	// likely settings in the transpilers
+	require.Equal(t, "cool is cool\n\tat webpack:///./test1.ts:2:4(2)\n\tat r (webpack:///./test1.ts:5:4(3))\n\tat file:///script.js:4:2(4)\n\tat native\n", exception.String())
+}
+
+func TestSourceMapsExternalExtentedInlined(t *testing.T) {
+	t.Parallel()
+	logger := testutils.NewLogger(t)
+	fs := afero.NewMemMapFs()
+	// This example is created through the template-typescript
+	// but was exported to use import/export syntax so it has to go through babel
+	assert.NoError(t, afero.WriteFile(fs, "/test1.js", []byte(`
+var o={d:(e,r)=>{for(var t in r)o.o(r,t)&&!o.o(e,t)&&Object.defineProperty(e,t,{enumerable:!0,get:r[t]})},o:(o,e)=>Object.prototype.hasOwnProperty.call(o,e)},e={};o.d(e,{Z:()=>r});const r=()=>{!function(o){throw"cool is cool"}()};var t=e.Z;export{t as default};
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIndlYnBhY2s6Ly8vd2VicGFjay9ib290c3RyYXAiLCJ3ZWJwYWNrOi8vL3dlYnBhY2svcnVudGltZS9kZWZpbmUgcHJvcGVydHkgZ2V0dGVycyIsIndlYnBhY2s6Ly8vd2VicGFjay9ydW50aW1lL2hhc093blByb3BlcnR5IHNob3J0aGFuZCIsIndlYnBhY2s6Ly8vLi90ZXN0MS50cyJdLCJuYW1lcyI6WyJfX3dlYnBhY2tfcmVxdWlyZV9fIiwiZXhwb3J0cyIsImRlZmluaXRpb24iLCJrZXkiLCJvIiwiT2JqZWN0IiwiZGVmaW5lUHJvcGVydHkiLCJlbnVtZXJhYmxlIiwiZ2V0Iiwib2JqIiwicHJvcCIsInByb3RvdHlwZSIsImhhc093blByb3BlcnR5IiwiY2FsbCIsInMiLCJjb29sVGhyb3ciXSwibWFwcGluZ3MiOiJBQUNBLElBQUlBLEVBQXNCLENDQTFCLEVBQXdCLENBQUNDLEVBQVNDLEtBQ2pDLElBQUksSUFBSUMsS0FBT0QsRUFDWEYsRUFBb0JJLEVBQUVGLEVBQVlDLEtBQVNILEVBQW9CSSxFQUFFSCxFQUFTRSxJQUM1RUUsT0FBT0MsZUFBZUwsRUFBU0UsRUFBSyxDQUFFSSxZQUFZLEVBQU1DLElBQUtOLEVBQVdDLE1DSjNFLEVBQXdCLENBQUNNLEVBQUtDLElBQVVMLE9BQU9NLFVBQVVDLGVBQWVDLEtBQUtKLEVBQUtDLEksc0JDR2xGLGNBSEEsU0FBbUJJLEdBQ2YsS0FBTSxlQUdOQyxJIiwiZmlsZSI6InRlc3QxLmpzIiwic291cmNlc0NvbnRlbnQiOlsiLy8gVGhlIHJlcXVpcmUgc2NvcGVcbnZhciBfX3dlYnBhY2tfcmVxdWlyZV9fID0ge307XG5cbiIsIi8vIGRlZmluZSBnZXR0ZXIgZnVuY3Rpb25zIGZvciBoYXJtb255IGV4cG9ydHNcbl9fd2VicGFja19yZXF1aXJlX18uZCA9IChleHBvcnRzLCBkZWZpbml0aW9uKSA9PiB7XG5cdGZvcih2YXIga2V5IGluIGRlZmluaXRpb24pIHtcblx0XHRpZihfX3dlYnBhY2tfcmVxdWlyZV9fLm8oZGVmaW5pdGlvbiwga2V5KSAmJiAhX193ZWJwYWNrX3JlcXVpcmVfXy5vKGV4cG9ydHMsIGtleSkpIHtcblx0XHRcdE9iamVjdC5kZWZpbmVQcm9wZXJ0eShleHBvcnRzLCBrZXksIHsgZW51bWVyYWJsZTogdHJ1ZSwgZ2V0OiBkZWZpbml0aW9uW2tleV0gfSk7XG5cdFx0fVxuXHR9XG59OyIsIl9fd2VicGFja19yZXF1aXJlX18ubyA9IChvYmosIHByb3ApID0+IChPYmplY3QucHJvdG90eXBlLmhhc093blByb3BlcnR5LmNhbGwob2JqLCBwcm9wKSkiLCJmdW5jdGlvbiBjb29sVGhyb3coczogc3RyaW5nKSB7XG4gICAgdGhyb3cgXCJjb29sIFwiKyBzXG59XG5leHBvcnQgZGVmYXVsdCAoKSA9PiB7XG4gICAgY29vbFRocm93KFwiaXMgY29vbFwiKVxufTtcbiJdLCJzb3VyY2VSb290IjoiIn0=
+`[1:]), 0o644))
+	data := `
+import l from "./test1.js"
+
+export default function () {
+		l()
+};
+`[1:]
+	b, err := getSimpleBundle(t, "/script.js", data, fs)
+	require.NoError(t, err)
+
+	bi, err := b.Instantiate(logger, 0)
+	require.NoError(t, err)
+	_, err = bi.exports[consts.DefaultFn](goja.Undefined())
+	require.Error(t, err)
+	exception := new(goja.Exception)
+	require.ErrorAs(t, err, &exception)
+	// TODO figure out why those are not the same as the one in the previous test TestSourceMapsExternal
+	// likely settings in the transpilers
+	require.Equal(t, "cool is cool\n\tat webpack:///./test1.ts:2:4(2)\n\tat r (webpack:///./test1.ts:5:4(3))\n\tat file:///script.js:4:2(4)\n\tat native\n", exception.String())
 }
