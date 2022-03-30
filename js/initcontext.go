@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/dop251/goja"
 	"github.com/sirupsen/logrus"
@@ -42,6 +43,7 @@ import (
 	"go.k6.io/k6/js/modules/k6/data"
 	"go.k6.io/k6/js/modules/k6/encoding"
 	"go.k6.io/k6/js/modules/k6/execution"
+	"go.k6.io/k6/js/modules/k6/experimental"
 	"go.k6.io/k6/js/modules/k6/grpc"
 	"go.k6.io/k6/js/modules/k6/html"
 	"go.k6.io/k6/js/modules/k6/http"
@@ -66,11 +68,9 @@ const openCantBeUsedOutsideInitContextMsg = `The "open()" function is only avail
 // TODO: refactor most/all of this state away, use common.InitEnvironment instead
 type InitContext struct {
 	// Bound runtime; used to instantiate objects.
-	runtime  *goja.Runtime
 	compiler *compiler.Compiler
 
-	// Pointer to a context that bridged modules are invoked with.
-	ctxPtr *context.Context
+	moduleVUImpl *moduleVUImpl
 
 	// Filesystem to load files and scripts from with the map key being the scheme
 	filesystems map[string]afero.Fs
@@ -92,19 +92,20 @@ func NewInitContext(
 	ctxPtr *context.Context, filesystems map[string]afero.Fs, pwd *url.URL,
 ) *InitContext {
 	return &InitContext{
-		runtime:           rt,
 		compiler:          c,
-		ctxPtr:            ctxPtr,
 		filesystems:       filesystems,
 		pwd:               pwd,
 		programs:          make(map[string]programWithSource),
 		compatibilityMode: compatMode,
 		logger:            logger,
 		modules:           getJSModules(),
+		moduleVUImpl: &moduleVUImpl{
+			ctxPtr: ctxPtr, runtime: rt,
+		},
 	}
 }
 
-func newBoundInitContext(base *InitContext, ctxPtr *context.Context, rt *goja.Runtime) *InitContext {
+func newBoundInitContext(base *InitContext, vuImpl *moduleVUImpl) *InitContext {
 	// we don't copy the exports as otherwise they will be shared and we don't want this.
 	// this means that all the files will be executed again but once again only once per compilation
 	// of the main file.
@@ -116,9 +117,6 @@ func newBoundInitContext(base *InitContext, ctxPtr *context.Context, rt *goja.Ru
 		}
 	}
 	return &InitContext{
-		runtime: rt,
-		ctxPtr:  ctxPtr,
-
 		filesystems: base.filesystems,
 		pwd:         base.pwd,
 		compiler:    base.compiler,
@@ -127,6 +125,7 @@ func newBoundInitContext(base *InitContext, ctxPtr *context.Context, rt *goja.Ru
 		compatibilityMode: base.compatibilityMode,
 		logger:            base.logger,
 		modules:           base.modules,
+		moduleVUImpl:      vuImpl,
 	}
 }
 
@@ -139,23 +138,31 @@ func (i *InitContext) Require(arg string) goja.Value {
 		// shadows attempts to name your own modules this.
 		v, err := i.requireModule(arg)
 		if err != nil {
-			common.Throw(i.runtime, err)
+			common.Throw(i.moduleVUImpl.runtime, err)
 		}
 		return v
 	default:
 		// Fall back to loading from the filesystem.
 		v, err := i.requireFile(arg)
 		if err != nil {
-			common.Throw(i.runtime, err)
+			common.Throw(i.moduleVUImpl.runtime, err)
 		}
 		return v
 	}
 }
 
-// TODO this likely should just be part of the initialized VU or at least to take stuff directly from it.
 type moduleVUImpl struct {
-	ctxPtr *context.Context
-	// we can technically put lib.State here as well as anything else
+	ctxPtr    *context.Context
+	initEnv   *common.InitEnvironment
+	state     *lib.State
+	runtime   *goja.Runtime
+	eventLoop *eventLoop
+}
+
+func newModuleVUImpl() *moduleVUImpl {
+	return &moduleVUImpl{
+		ctxPtr: new(context.Context),
+	}
 }
 
 func (m *moduleVUImpl) Context() context.Context {
@@ -163,16 +170,39 @@ func (m *moduleVUImpl) Context() context.Context {
 }
 
 func (m *moduleVUImpl) InitEnv() *common.InitEnvironment {
-	return common.GetInitEnv(*m.ctxPtr) // TODO thread it correctly instead
+	return m.initEnv
 }
 
 func (m *moduleVUImpl) State() *lib.State {
-	return lib.GetState(*m.ctxPtr) // TODO thread it correctly instead
+	return m.state
 }
 
 func (m *moduleVUImpl) Runtime() *goja.Runtime {
-	return common.GetRuntime(*m.ctxPtr) // TODO thread it correctly instead
+	return m.runtime
 }
+
+func (m *moduleVUImpl) RegisterCallback() func(func() error) {
+	return m.eventLoop.registerCallback()
+}
+
+/* This is here to illustrate how to use RegisterCallback to get a promise to work with the event loop
+// TODO move this to a common function or remove before merging
+
+// MakeHandledPromise will create and promise and return it's resolve, reject methods as well wrapped in such a way that
+// it will block the eventloop from exiting before they are called even if the promise isn't resolved by the time the
+// current script ends executing
+func (m *moduleVUImpl) MakeHandledPromise() (*goja.Promise, func(interface{}), func(interface{})) {
+	callback := m.eventLoop.registerCallback()
+	p, resolve, reject := m.runtime.NewPromise()
+	return p, func(i interface{}) {
+			// more stuff
+			callback(func() { resolve(i) })
+		}, func(i interface{}) {
+			// more stuff
+			callback(func() { reject(i) })
+		}
+}
+*/
 
 func toESModuleExports(exp modules.Exports) interface{} {
 	if exp.Named == nil {
@@ -197,20 +227,26 @@ func toESModuleExports(exp modules.Exports) interface{} {
 	return result
 }
 
+// TODO: https://github.com/grafana/k6/issues/2385
+var onceBindWarning sync.Once //nolint: gochecknoglobals
+
 func (i *InitContext) requireModule(name string) (goja.Value, error) {
 	mod, ok := i.modules[name]
 	if !ok {
 		return nil, fmt.Errorf("unknown module: %s", name)
 	}
 	if m, ok := mod.(modules.Module); ok {
-		instance := m.NewModuleInstance(&moduleVUImpl{ctxPtr: i.ctxPtr})
-		return i.runtime.ToValue(toESModuleExports(instance.Exports())), nil
-	}
-	if perInstance, ok := mod.(modules.HasModuleInstancePerVU); ok {
-		mod = perInstance.NewModuleInstancePerVU()
+		instance := m.NewModuleInstance(i.moduleVUImpl)
+		return i.moduleVUImpl.runtime.ToValue(toESModuleExports(instance.Exports())), nil
 	}
 
-	return i.runtime.ToValue(common.Bind(i.runtime, mod, i.ctxPtr)), nil
+	onceBindWarning.Do(func() {
+		i.logger.Warnf(`Module '%s' is using deprecated APIs that will be removed in k6 v0.38.0,`+
+			` for more details on how to update it see`+
+			` https://k6.io/docs/extensions/guides/create-an-extension/#advanced-javascript-extension`, name)
+	})
+
+	return i.moduleVUImpl.runtime.ToValue(common.Bind(i.moduleVUImpl.runtime, mod, i.moduleVUImpl.ctxPtr)), nil
 }
 
 func (i *InitContext) requireFile(name string) (goja.Value, error) {
@@ -232,8 +268,8 @@ func (i *InitContext) requireFile(name string) (goja.Value, error) {
 		}
 		i.pwd = loader.Dir(fileURL)
 		defer func() { i.pwd = pwd }()
-		exports := i.runtime.NewObject()
-		pgm.module = i.runtime.NewObject()
+		exports := i.moduleVUImpl.runtime.NewObject()
+		pgm.module = i.moduleVUImpl.runtime.NewObject()
 		_ = pgm.module.Set("exports", exports)
 
 		if pgm.pgm == nil {
@@ -255,7 +291,7 @@ func (i *InitContext) requireFile(name string) (goja.Value, error) {
 		i.programs[fileURL.String()] = pgm
 
 		// Run the program.
-		f, err := i.runtime.RunProgram(pgm.pgm)
+		f, err := i.moduleVUImpl.runtime.RunProgram(pgm.pgm)
 		if err != nil {
 			delete(i.programs, fileURL.String())
 			return goja.Undefined(), err
@@ -278,8 +314,8 @@ func (i *InitContext) compileImport(src, filename string) (*goja.Program, error)
 // Open implements open() in the init context and will read and return the
 // contents of a file. If the second argument is "b" it returns an ArrayBuffer
 // instance, otherwise a string representation.
-func (i *InitContext) Open(ctx context.Context, filename string, args ...string) (goja.Value, error) {
-	if lib.GetState(ctx) != nil {
+func (i *InitContext) Open(filename string, args ...string) (goja.Value, error) {
+	if i.moduleVUImpl.State() != nil {
 		return nil, errors.New(openCantBeUsedOutsideInitContextMsg)
 	}
 
@@ -306,10 +342,10 @@ func (i *InitContext) Open(ctx context.Context, filename string, args ...string)
 	}
 
 	if len(args) > 0 && args[0] == "b" {
-		ab := i.runtime.NewArrayBuffer(data)
-		return i.runtime.ToValue(&ab), nil
+		ab := i.moduleVUImpl.runtime.NewArrayBuffer(data)
+		return i.moduleVUImpl.runtime.ToValue(&ab), nil
 	}
-	return i.runtime.ToValue(string(data)), nil
+	return i.moduleVUImpl.runtime.ToValue(string(data)), nil
 }
 
 func readFile(fileSystem afero.Fs, filename string) (data []byte, err error) {
@@ -348,17 +384,18 @@ func (i *InitContext) allowOnlyOpenedFiles() {
 
 func getInternalJSModules() map[string]interface{} {
 	return map[string]interface{}{
-		"k6":             k6.New(),
-		"k6/crypto":      crypto.New(),
-		"k6/crypto/x509": x509.New(),
-		"k6/data":        data.New(),
-		"k6/encoding":    encoding.New(),
-		"k6/execution":   execution.New(),
-		"k6/net/grpc":    grpc.New(),
-		"k6/html":        html.New(),
-		"k6/http":        http.New(),
-		"k6/metrics":     metrics.New(),
-		"k6/ws":          ws.New(),
+		"k6":              k6.New(),
+		"k6/crypto":       crypto.New(),
+		"k6/crypto/x509":  x509.New(),
+		"k6/data":         data.New(),
+		"k6/encoding":     encoding.New(),
+		"k6/execution":    execution.New(),
+		"k6/net/grpc":     grpc.New(),
+		"k6/html":         html.New(),
+		"k6/http":         http.New(),
+		"k6/metrics":      metrics.New(),
+		"k6/ws":           ws.New(),
+		"k6/experimental": experimental.New(),
 	}
 }
 

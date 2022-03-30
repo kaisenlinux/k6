@@ -37,10 +37,6 @@ import (
 	"go.k6.io/k6/loader"
 )
 
-// Use these when interacting with fs and writing to terminal, makes a command testable
-var defaultFs = afero.NewOsFs()
-var defaultWriter io.Writer = os.Stdout
-
 // Panic if the given error is not nil.
 func must(err error) {
 	if err != nil {
@@ -48,7 +44,7 @@ func must(err error) {
 	}
 }
 
-//TODO: refactor the CLI config so these functions aren't needed - they
+// TODO: refactor the CLI config so these functions aren't needed - they
 // can mask errors by failing only at runtime, not at compile time
 func getNullBool(flags *pflag.FlagSet, key string) null.Bool {
 	v, err := flags.GetBool(key)
@@ -104,15 +100,6 @@ func readSource(filename string, logger *logrus.Logger) (*loader.SourceData, map
 	filesystems := loader.CreateFilesystems()
 	src, err := loader.ReadSource(logger, filename, pwd, filesystems, os.Stdin)
 	return src, filesystems, err
-}
-
-// TODO: consider moving this out as a method of SourceData ?
-func getRunType(src *loader.SourceData) string {
-	typ := runType
-	if typ == "" {
-		typ = detectType(src.Data)
-	}
-	return typ
 }
 
 func detectType(data []byte) string {

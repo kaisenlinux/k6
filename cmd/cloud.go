@@ -49,14 +49,8 @@ import (
 	"go.k6.io/k6/ui/pb"
 )
 
-//nolint:gochecknoglobals
-var (
-	exitOnRunning = os.Getenv("K6_EXIT_ON_RUNNING") != ""
-	showCloudLogs = true
-)
-
-//nolint:funlen,gocognit,gocyclo
-func getCloudCmd(ctx context.Context, logger *logrus.Logger) *cobra.Command {
+//nolint:funlen,gocognit,gocyclo,cyclop
+func getCloudCmd(ctx context.Context, logger *logrus.Logger, globalFlags *commandFlags) *cobra.Command {
 	cloudCmd := &cobra.Command{
 		Use:   "cloud",
 		Short: "Run a test on the cloud",
@@ -76,17 +70,17 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 					return fmt.Errorf("parsing K6_SHOW_CLOUD_LOGS returned an error: %w", err)
 				}
 				if !cmd.Flags().Changed("show-logs") {
-					showCloudLogs = showCloudLogsValue
+					globalFlags.showCloudLogs = showCloudLogsValue
 				}
 			}
 			// TODO: disable in quiet mode?
-			_, _ = fmt.Fprintf(stdout, "\n%s\n\n", getBanner(noColor || !stdoutTTY))
+			_, _ = fmt.Fprintf(globalFlags.stdout, "\n%s\n\n", getBanner(globalFlags.noColor || !globalFlags.stdoutTTY))
 
 			progressBar := pb.New(
 				pb.WithConstLeft("Init"),
 				pb.WithConstProgress(0, "Parsing script"),
 			)
-			printBar(progressBar)
+			printBar(progressBar, globalFlags)
 
 			// Runner
 			filename := args[0]
@@ -101,25 +95,38 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 				return err
 			}
 
-			modifyAndPrintBar(progressBar, pb.WithConstProgress(0, "Getting script options"))
+			modifyAndPrintBar(progressBar, globalFlags, pb.WithConstProgress(0, "Getting script options"))
 			registry := metrics.NewRegistry()
 			builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-			r, err := newRunner(logger, src, runType, filesystems, runtimeOptions, builtinMetrics, registry)
+			r, err := newRunner(logger, src, globalFlags.runType, filesystems, runtimeOptions, builtinMetrics, registry)
 			if err != nil {
 				return err
 			}
 
-			modifyAndPrintBar(progressBar, pb.WithConstProgress(0, "Consolidating options"))
+			modifyAndPrintBar(progressBar, globalFlags, pb.WithConstProgress(0, "Consolidating options"))
 			cliOpts, err := getOptions(cmd.Flags())
 			if err != nil {
 				return err
 			}
-			conf, err := getConsolidatedConfig(afero.NewOsFs(), Config{Options: cliOpts}, r.GetOptions())
+			conf, err := getConsolidatedConfig(
+				afero.NewOsFs(), Config{Options: cliOpts}, r.GetOptions(), buildEnvMap(os.Environ()), globalFlags)
 			if err != nil {
 				return err
 			}
 
-			derivedConf, err := deriveAndValidateConfig(conf, r.IsExecutable)
+			// Parse the thresholds, only if the --no-threshold flag is not set.
+			// If parsing the threshold expressions failed, consider it as an
+			// invalid configuration error.
+			if !runtimeOptions.NoThresholds.Bool {
+				for _, thresholds := range conf.Options.Thresholds {
+					err = thresholds.Parse()
+					if err != nil {
+						return errext.WithExitCodeIfNone(err, exitcodes.InvalidConfig)
+					}
+				}
+			}
+
+			derivedConf, err := deriveAndValidateConfig(conf, r.IsExecutable, logger)
 			if err != nil {
 				return err
 			}
@@ -133,7 +140,7 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 				return err
 			}
 
-			modifyAndPrintBar(progressBar, pb.WithConstProgress(0, "Building the archive"))
+			modifyAndPrintBar(progressBar, globalFlags, pb.WithConstProgress(0, "Building the archive"))
 			arc := r.MakeArchive()
 			// TODO: Fix this
 			// We reuse cloud.Config for parsing options.ext.loadimpact, but this probably shouldn't be
@@ -191,14 +198,14 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 			defer globalCancel()
 
 			// Start cloud test run
-			modifyAndPrintBar(progressBar, pb.WithConstProgress(0, "Validating script options"))
+			modifyAndPrintBar(progressBar, globalFlags, pb.WithConstProgress(0, "Validating script options"))
 			client := cloudapi.NewClient(
 				logger, cloudConfig.Token.String, cloudConfig.Host.String, consts.Version, cloudConfig.Timeout.TimeDuration())
 			if err = client.ValidateOptions(arc.Options); err != nil {
 				return err
 			}
 
-			modifyAndPrintBar(progressBar, pb.WithConstProgress(0, "Uploading archive"))
+			modifyAndPrintBar(progressBar, globalFlags, pb.WithConstProgress(0, "Uploading archive"))
 			refID, err := client.StartCloudTestRun(name, cloudConfig.ProjectID.Int64, arc)
 			if err != nil {
 				return err
@@ -235,11 +242,12 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 			executionPlan := derivedConf.Scenarios.GetFullExecutionRequirements(et)
 			printExecutionDescription(
 				"cloud", filename, testURL, derivedConf, et,
-				executionPlan, nil, noColor || !stdoutTTY,
+				executionPlan, nil, globalFlags.noColor || !globalFlags.stdoutTTY, globalFlags,
 			)
 
 			modifyAndPrintBar(
 				progressBar,
+				globalFlags,
 				pb.WithConstLeft("Run "),
 				pb.WithConstProgress(0, "Initializing the cloud test"),
 			)
@@ -250,7 +258,7 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 			defer progressBarWG.Wait()
 			defer progressCancel()
 			go func() {
-				showProgress(progressCtx, conf, []*pb.ProgressBar{progressBar}, logger)
+				showProgress(progressCtx, []*pb.ProgressBar{progressBar}, logger, globalFlags)
 				progressBarWG.Done()
 			}()
 
@@ -292,7 +300,7 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 			)
 
 			ticker := time.NewTicker(time.Millisecond * 2000)
-			if showCloudLogs {
+			if globalFlags.showCloudLogs {
 				go func() {
 					logger.Debug("Connecting to cloud logs server...")
 					if err := cloudConfig.StreamLogsToLogger(globalCtx, logger, refID, 0); err != nil {
@@ -313,7 +321,7 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 				testProgressLock.Unlock()
 
 				if (newTestProgress.RunStatus > lib.RunStatusRunning) ||
-					(exitOnRunning && newTestProgress.RunStatus == lib.RunStatusRunning) {
+					(globalFlags.exitOnRunning && newTestProgress.RunStatus == lib.RunStatusRunning) {
 					globalCancel()
 					break
 				}
@@ -324,8 +332,8 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 				return errext.WithExitCodeIfNone(errors.New("Test progress error"), exitcodes.CloudFailedToGetProgress)
 			}
 
-			valueColor := getColor(noColor || !stdoutTTY, color.FgCyan)
-			fprintf(stdout, "     test status: %s\n", valueColor.Sprint(testProgress.RunStatusText))
+			valueColor := getColor(globalFlags.noColor || !globalFlags.stdoutTTY, color.FgCyan)
+			fprintf(globalFlags.stdout, "     test status: %s\n", valueColor.Sprint(testProgress.RunStatusText))
 
 			if testProgress.ResultStatus == cloudapi.ResultStatusFailed {
 				// TODO: use different exit codes for failed thresholds vs failed test (e.g. aborted by system/limit)
@@ -337,11 +345,11 @@ This will execute the test on the k6 cloud service. Use "k6 login cloud" to auth
 		},
 	}
 	cloudCmd.Flags().SortFlags = false
-	cloudCmd.Flags().AddFlagSet(cloudCmdFlagSet())
+	cloudCmd.Flags().AddFlagSet(cloudCmdFlagSet(globalFlags))
 	return cloudCmd
 }
 
-func cloudCmdFlagSet() *pflag.FlagSet {
+func cloudCmdFlagSet(globalFlags *commandFlags) *pflag.FlagSet {
 	flags := pflag.NewFlagSet("", pflag.ContinueOnError)
 	flags.SortFlags = false
 	flags.AddFlagSet(optionFlagSet())
@@ -351,13 +359,13 @@ func cloudCmdFlagSet() *pflag.FlagSet {
 	// - the default value is specified in this way so we don't overwrire whatever
 	//   was specified via the environment variable
 	// - global variables are not very testable... :/
-	flags.BoolVar(&exitOnRunning, "exit-on-running", exitOnRunning, "exits when test reaches the running status")
+	flags.BoolVar(&globalFlags.exitOnRunning, "exit-on-running", globalFlags.exitOnRunning, "exits when test reaches the running status") //nolint:lll
 	// We also need to explicitly set the default value for the usage message here, so setting
 	// K6_EXIT_ON_RUNNING=true won't affect the usage message
 	flags.Lookup("exit-on-running").DefValue = "false"
 
 	// read the comments above for explanation why this is done this way and what are the problems
-	flags.BoolVar(&showCloudLogs, "show-logs", showCloudLogs,
+	flags.BoolVar(&globalFlags.showCloudLogs, "show-logs", globalFlags.showCloudLogs,
 		"enable showing of logs when a test is executed in the cloud")
 
 	return flags

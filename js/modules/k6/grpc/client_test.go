@@ -23,8 +23,10 @@ package grpc
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net/url"
 	"os"
 	"runtime"
@@ -51,9 +53,11 @@ import (
 	"gopkg.in/guregu/null.v3"
 
 	"go.k6.io/k6/js/common"
+	"go.k6.io/k6/js/modulestest"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/fsext"
 	"go.k6.io/k6/lib/metrics"
+	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/lib/testutils/httpmultibin"
 	"go.k6.io/k6/stats"
 )
@@ -160,6 +164,24 @@ func TestClient(t *testing.T) {
 	}
 
 	tests := []testcase{
+		{
+			name: "BadTLS",
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				// changing the pointer's value
+				// for affecting the lib.State
+				// that uses the same pointer
+				*tb.TLSClientConfig = tls.Config{
+					MinVersion: tls.VersionTLS13,
+				}
+			},
+			initString: codeBlock{
+				code: `var client = new grpc.Client();`,
+			},
+			vuString: codeBlock{
+				code: `client.connect("GRPCBIN_ADDR", {timeout: '1s'})`,
+				err:  "certificate signed by unknown authority",
+			},
+		},
 		{
 			name: "New",
 			initString: codeBlock{
@@ -416,7 +438,7 @@ func TestClient(t *testing.T) {
 			},
 			vuString: codeBlock{code: `
 				client.connect("GRPCBIN_ADDR");
-				var resp = client.invoke("grpc.testing.TestService/EmptyCall", {}, { headers: { "X-Load-Tester": "k6" } })
+				var resp = client.invoke("grpc.testing.TestService/EmptyCall", {}, { metadata: { "X-Load-Tester": "k6" } })
 				if (resp.status !== grpc.StatusOK) {
 					throw new Error("failed to send correct headers in the request")
 				}
@@ -669,11 +691,17 @@ func TestClient(t *testing.T) {
 
 			ts := setup(t)
 
-			// create and attach the GRPC module to goja
-			ctx := common.WithRuntime(context.Background(), ts.rt)
-			ctx = common.WithInitEnv(ctx, ts.env)
-			err := ts.rt.Set("grpc", common.Bind(ts.rt, New(), &ctx))
-			require.NoError(t, err)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			mvu := &modulestest.VU{
+				RuntimeField: ts.rt,
+				InitEnvField: ts.env,
+				CtxField:     ctx,
+			}
+
+			m, ok := New().NewModuleInstance(mvu).(*ModuleInstance)
+			require.True(t, ok)
+			require.NoError(t, ts.rt.Set("grpc", m.Exports().Named))
 
 			// setup necessary environment if needed by a test
 			if tt.setup != nil {
@@ -687,7 +715,7 @@ func TestClient(t *testing.T) {
 			val, err := replace(tt.initString.code)
 			assertResponse(t, tt.initString, err, val, ts)
 
-			ctx = lib.WithState(ctx, ts.vuState)
+			mvu.StateField = ts.vuState
 			val, err = replace(tt.vuString.code)
 			assertResponse(t, tt.vuString, err, val, ts)
 		})
@@ -765,6 +793,36 @@ func TestDebugStat(t *testing.T) {
 			assert.Contains(t, b.String(), tt.expected)
 		})
 	}
+}
+
+func TestClientInvokeHeadersDeprecated(t *testing.T) {
+	t.Parallel()
+
+	logHook := &testutils.SimpleLogrusHook{
+		HookedLevels: []logrus.Level{logrus.WarnLevel},
+	}
+	testLog := logrus.New()
+	testLog.AddHook(logHook)
+	testLog.SetOutput(ioutil.Discard)
+
+	c := Client{
+		vu: &modulestest.VU{
+			StateField: &lib.State{
+				Logger: testLog,
+			},
+		},
+	}
+	params := map[string]interface{}{
+		"headers": map[string]interface{}{
+			"X-HEADER-FOO": "bar",
+		},
+	}
+	_, err := c.parseParams(params)
+	require.NoError(t, err)
+
+	entries := logHook.Drain()
+	require.Len(t, entries, 1)
+	require.Contains(t, entries[0].Message, "headers property is deprecated")
 }
 
 func TestResolveFileDescriptors(t *testing.T) {

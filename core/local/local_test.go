@@ -63,7 +63,7 @@ func newTestExecutionScheduler(
 	ctx, cancel = context.WithCancel(context.Background())
 	newOpts, err := executor.DeriveScenariosFromShortcuts(lib.Options{
 		MetricSamplesBufferSize: null.NewInt(200, false),
-	}.Apply(runner.GetOptions()).Apply(opts))
+	}.Apply(runner.GetOptions()).Apply(opts), nil)
 	require.NoError(t, err)
 	require.Empty(t, newOpts.Validate())
 
@@ -820,7 +820,7 @@ func TestExecutionSchedulerStages(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			runner := &minirunner.MiniRunner{
-				Fn: func(ctx context.Context, out chan<- stats.SampleContainer) error {
+				Fn: func(ctx context.Context, _ *lib.State, out chan<- stats.SampleContainer) error {
 					time.Sleep(100 * time.Millisecond)
 					return nil
 				},
@@ -839,7 +839,7 @@ func TestExecutionSchedulerStages(t *testing.T) {
 func TestExecutionSchedulerEndTime(t *testing.T) {
 	t.Parallel()
 	runner := &minirunner.MiniRunner{
-		Fn: func(ctx context.Context, out chan<- stats.SampleContainer) error {
+		Fn: func(ctx context.Context, _ *lib.State, out chan<- stats.SampleContainer) error {
 			time.Sleep(100 * time.Millisecond)
 			return nil
 		},
@@ -866,7 +866,7 @@ func TestExecutionSchedulerEndTime(t *testing.T) {
 func TestExecutionSchedulerRuntimeErrors(t *testing.T) {
 	t.Parallel()
 	runner := &minirunner.MiniRunner{
-		Fn: func(ctx context.Context, out chan<- stats.SampleContainer) error {
+		Fn: func(ctx context.Context, _ *lib.State, out chan<- stats.SampleContainer) error {
 			time.Sleep(10 * time.Millisecond)
 			return errors.New("hi")
 		},
@@ -906,7 +906,7 @@ func TestExecutionSchedulerEndErrors(t *testing.T) {
 	exec.GracefulStop = types.NullDurationFrom(0 * time.Second)
 
 	runner := &minirunner.MiniRunner{
-		Fn: func(ctx context.Context, out chan<- stats.SampleContainer) error {
+		Fn: func(ctx context.Context, _ *lib.State, out chan<- stats.SampleContainer) error {
 			<-ctx.Done()
 			return errors.New("hi")
 		},
@@ -940,13 +940,13 @@ func TestExecutionSchedulerEndIterations(t *testing.T) {
 	options, err := executor.DeriveScenariosFromShortcuts(lib.Options{
 		VUs:        null.IntFrom(1),
 		Iterations: null.IntFrom(100),
-	})
+	}, nil)
 	require.NoError(t, err)
 	require.Empty(t, options.Validate())
 
 	var i int64
 	runner := &minirunner.MiniRunner{
-		Fn: func(ctx context.Context, out chan<- stats.SampleContainer) error {
+		Fn: func(ctx context.Context, _ *lib.State, out chan<- stats.SampleContainer) error {
 			select {
 			case <-ctx.Done():
 			default:
@@ -987,7 +987,7 @@ func TestExecutionSchedulerEndIterations(t *testing.T) {
 func TestExecutionSchedulerIsRunning(t *testing.T) {
 	t.Parallel()
 	runner := &minirunner.MiniRunner{
-		Fn: func(ctx context.Context, out chan<- stats.SampleContainer) error {
+		Fn: func(ctx context.Context, _ *lib.State, out chan<- stats.SampleContainer) error {
 			<-ctx.Done()
 			return nil
 		},
@@ -1168,7 +1168,7 @@ func TestRealTimeAndSetupTeardownMetrics(t *testing.T) {
 		SystemTags:      &stats.DefaultSystemTagSet,
 		SetupTimeout:    types.NullDurationFrom(4 * time.Second),
 		TeardownTimeout: types.NullDurationFrom(4 * time.Second),
-	}))
+	}), nil)
 	require.NoError(t, err)
 	require.NoError(t, runner.SetOptions(options))
 
@@ -1351,7 +1351,7 @@ func TestSetPaused(t *testing.T) {
 		options, err := executor.DeriveScenariosFromShortcuts(lib.Options{
 			Iterations: null.IntFrom(2),
 			VUs:        null.IntFrom(1),
-		}.Apply(runner.GetOptions()))
+		}.Apply(runner.GetOptions()), nil)
 		require.NoError(t, err)
 		require.NoError(t, runner.SetOptions(options))
 

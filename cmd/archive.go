@@ -28,12 +28,12 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"go.k6.io/k6/errext"
+	"go.k6.io/k6/errext/exitcodes"
 	"go.k6.io/k6/lib/metrics"
 )
 
-var archiveOut = "archive.tar"
-
-func getArchiveCmd(logger *logrus.Logger) *cobra.Command {
+func getArchiveCmd(logger *logrus.Logger, globalFlags *commandFlags) *cobra.Command {
 	// archiveCmd represents the archive command
 	archiveCmd := &cobra.Command{
 		Use:   "archive",
@@ -61,7 +61,7 @@ An archive is a fully self-contained test run, and can be executed identically e
 
 			registry := metrics.NewRegistry()
 			builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-			r, err := newRunner(logger, src, runType, filesystems, runtimeOptions, builtinMetrics, registry)
+			r, err := newRunner(logger, src, globalFlags.runType, filesystems, runtimeOptions, builtinMetrics, registry)
 			if err != nil {
 				return err
 			}
@@ -70,12 +70,26 @@ An archive is a fully self-contained test run, and can be executed identically e
 			if err != nil {
 				return err
 			}
-			conf, err := getConsolidatedConfig(afero.NewOsFs(), Config{Options: cliOpts}, r.GetOptions())
+			conf, err := getConsolidatedConfig(
+				afero.NewOsFs(), Config{Options: cliOpts}, r.GetOptions(), buildEnvMap(os.Environ()), globalFlags,
+			)
 			if err != nil {
 				return err
 			}
 
-			_, err = deriveAndValidateConfig(conf, r.IsExecutable)
+			// Parse the thresholds, only if the --no-threshold flag is not set.
+			// If parsing the threshold expressions failed, consider it as an
+			// invalid configuration error.
+			if !runtimeOptions.NoThresholds.Bool {
+				for _, thresholds := range conf.Options.Thresholds {
+					err = thresholds.Parse()
+					if err != nil {
+						return errext.WithExitCodeIfNone(err, exitcodes.InvalidConfig)
+					}
+				}
+			}
+
+			_, err = deriveAndValidateConfig(conf, r.IsExecutable, logger)
 			if err != nil {
 				return err
 			}
@@ -87,26 +101,30 @@ An archive is a fully self-contained test run, and can be executed identically e
 
 			// Archive.
 			arc := r.MakeArchive()
-			f, err := os.Create(archiveOut)
+			f, err := os.Create(globalFlags.archiveOut)
 			if err != nil {
 				return err
 			}
-			return arc.Write(f)
+
+			err = arc.Write(f)
+			if cerr := f.Close(); err == nil && cerr != nil {
+				err = cerr
+			}
+			return err
 		},
 	}
 
 	archiveCmd.Flags().SortFlags = false
-	archiveCmd.Flags().AddFlagSet(archiveCmdFlagSet())
+	archiveCmd.Flags().AddFlagSet(archiveCmdFlagSet(globalFlags))
 
 	return archiveCmd
 }
 
-func archiveCmdFlagSet() *pflag.FlagSet {
+func archiveCmdFlagSet(globalFlags *commandFlags) *pflag.FlagSet {
 	flags := pflag.NewFlagSet("", pflag.ContinueOnError)
 	flags.SortFlags = false
 	flags.AddFlagSet(optionFlagSet())
 	flags.AddFlagSet(runtimeOptionFlagSet(false))
-	// TODO: figure out a better way to handle the CLI flags - global variables are not very testable... :/
-	flags.StringVarP(&archiveOut, "archive-out", "O", archiveOut, "archive output filename")
+	flags.StringVarP(&globalFlags.archiveOut, "archive-out", "O", globalFlags.archiveOut, "archive output filename")
 	return flags
 }

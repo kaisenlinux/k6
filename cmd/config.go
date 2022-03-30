@@ -28,7 +28,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kelseyhightower/envconfig"
+	"github.com/mstoykov/envconfig"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
 	"github.com/spf13/pflag"
 	"gopkg.in/guregu/null.v3"
@@ -51,6 +52,7 @@ func configFlagSet() *pflag.FlagSet {
 	return flags
 }
 
+// Config ...
 type Config struct {
 	lib.Options
 
@@ -65,12 +67,13 @@ type Config struct {
 // Validate checks if all of the specified options make sense
 func (c Config) Validate() []error {
 	errors := c.Options.Validate()
-	//TODO: validate all of the other options... that we should have already been validating...
-	//TODO: maybe integrate an external validation lib: https://github.com/avelino/awesome-go#validation
+	// TODO: validate all of the other options... that we should have already been validating...
+	// TODO: maybe integrate an external validation lib: https://github.com/avelino/awesome-go#validation
 
 	return errors
 }
 
+// Apply the provided config on top of the current one, returning a new one. The provided config has priority.
 func (c Config) Apply(cfg Config) Config {
 	c.Options = c.Options.Apply(cfg.Options)
 	if len(cfg.Out) > 0 {
@@ -112,16 +115,16 @@ func getConfig(flags *pflag.FlagSet) (Config, error) {
 // an error will be returned.
 // If there's no custom config specified and no file exists in the default config path, it will
 // return an empty config struct, the default config location and *no* error.
-func readDiskConfig(fs afero.Fs) (Config, string, error) {
-	realConfigFilePath := configFilePath
+func readDiskConfig(fs afero.Fs, globalFlags *commandFlags) (Config, string, error) {
+	realConfigFilePath := globalFlags.configFilePath
 	if realConfigFilePath == "" {
 		// The user didn't specify K6_CONFIG or --config, use the default path
-		realConfigFilePath = defaultConfigFilePath
+		realConfigFilePath = globalFlags.defaultConfigFilePath
 	}
 
 	// Try to see if the file exists in the supplied filesystem
 	if _, err := fs.Stat(realConfigFilePath); err != nil {
-		if os.IsNotExist(err) && configFilePath == "" {
+		if os.IsNotExist(err) && globalFlags.configFilePath == "" {
 			// If the file doesn't exist, but it was the default config file (i.e. the user
 			// didn't specify anything), silence the error
 			err = nil
@@ -146,18 +149,21 @@ func writeDiskConfig(fs afero.Fs, configPath string, conf Config) error {
 		return err
 	}
 
-	if err := fs.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+	if err := fs.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		return err
 	}
 
-	return afero.WriteFile(fs, configPath, data, 0644)
+	return afero.WriteFile(fs, configPath, data, 0o644)
 }
 
 // Reads configuration variables from the environment.
-func readEnvConfig() (Config, error) {
+func readEnvConfig(envMap map[string]string) (Config, error) {
 	// TODO: replace envconfig and refactor the whole configuration from the ground up :/
 	conf := Config{}
-	err := envconfig.Process("", &conf)
+	err := envconfig.Process("", &conf, func(key string) (string, bool) {
+		v, ok := envMap[key]
+		return v, ok
+	})
 	return conf, err
 }
 
@@ -170,14 +176,16 @@ func readEnvConfig() (Config, error) {
 // - set some defaults if they weren't previously specified
 // TODO: add better validation, more explicit default values and improve consistency between formats
 // TODO: accumulate all errors and differentiate between the layers?
-func getConsolidatedConfig(fs afero.Fs, cliConf Config, runnerOpts lib.Options) (conf Config, err error) {
+func getConsolidatedConfig(
+	fs afero.Fs, cliConf Config, runnerOpts lib.Options, envMap map[string]string, globalFlags *commandFlags,
+) (conf Config, err error) {
 	// TODO: use errext.WithExitCodeIfNone(err, exitcodes.InvalidConfig) where it makes sense?
 
-	fileConf, _, err := readDiskConfig(fs)
+	fileConf, _, err := readDiskConfig(fs, globalFlags)
 	if err != nil {
 		return conf, err
 	}
-	envConf, err := readEnvConfig()
+	envConf, err := readEnvConfig(envMap)
 	if err != nil {
 		return conf, err
 	}
@@ -226,9 +234,11 @@ func applyDefault(conf Config) Config {
 	return conf
 }
 
-func deriveAndValidateConfig(conf Config, isExecutable func(string) bool) (result Config, err error) {
+func deriveAndValidateConfig(
+	conf Config, isExecutable func(string) bool, logger logrus.FieldLogger,
+) (result Config, err error) {
 	result = conf
-	result.Options, err = executor.DeriveScenariosFromShortcuts(conf.Options)
+	result.Options, err = executor.DeriveScenariosFromShortcuts(conf.Options, logger)
 	if err == nil {
 		err = validateConfig(result, isExecutable)
 	}

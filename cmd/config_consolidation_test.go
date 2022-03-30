@@ -20,9 +20,10 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -133,13 +134,16 @@ func mostFlagSets() []flagSetInit {
 	// getConsolidatedConfig() is used, but they also have differences in their CLI flags :/
 	// sigh... compromises...
 	result := []flagSetInit{}
-	for i, fsi := range []flagSetInit{runCmdFlagSet, archiveCmdFlagSet, cloudCmdFlagSet} {
+	for i, fsi := range []func(globalFlags *commandFlags) *pflag.FlagSet{runCmdFlagSet, archiveCmdFlagSet, cloudCmdFlagSet} {
 		i, fsi := i, fsi // go...
-		result = append(result, func() *pflag.FlagSet {
+		// TODO: this still uses os.GetEnv which needs to be removed
+		// before/along adding tests for those fields
+		root := newRootCommand(context.Background(), nil, nil)
+		result = append(result, func() (*pflag.FlagSet, *commandFlags) {
 			flags := pflag.NewFlagSet(fmt.Sprintf("superContrivedFlags_%d", i), pflag.ContinueOnError)
-			flags.AddFlagSet(new(rootCommand).rootCmdPersistentFlagSet())
-			flags.AddFlagSet(fsi())
-			return flags
+			flags.AddFlagSet(root.rootCmdPersistentFlagSet())
+			flags.AddFlagSet(fsi(root.commandFlags))
+			return flags, root.commandFlags
 		})
 	}
 	return result
@@ -157,11 +161,7 @@ func getFS(files []file) afero.Fs {
 	return fs
 }
 
-func defaultConfig(jsonConfig string) afero.Fs {
-	return getFS([]file{{defaultConfigFilePath, jsonConfig}})
-}
-
-type flagSetInit func() *pflag.FlagSet
+type flagSetInit func() (*pflag.FlagSet, *commandFlags)
 
 type opts struct {
 	cli    []string
@@ -174,19 +174,7 @@ type opts struct {
 	// actually will change those variables to their default values :| In our
 	// case, this happens only some of the time, for global variables that
 	// are configurable only via CLI flags, but not environment variables.
-	//
-	// For the rest, their default value is their current value, since that
-	// has been set from the environment variable. That has a bunch of other
-	// issues on its own, and the func() doesn't help at all, and we need to
-	// use the resetStickyGlobalVars() hack on top of that...
 	cliFlagSetInits []flagSetInit
-}
-
-func resetStickyGlobalVars() {
-	// TODO: remove after fixing the config, obviously a dirty hack
-	exitOnRunning = false
-	configFilePath = ""
-	runType = ""
 }
 
 // exp contains the different events or errors we expect our test case to trigger.
@@ -208,6 +196,21 @@ type configConsolidationTestCase struct {
 }
 
 func getConfigConsolidationTestCases() []configConsolidationTestCase {
+	defaultConfig := func(jsonConfig string) afero.Fs {
+		confDir, err := os.UserConfigDir()
+		if err != nil {
+			confDir = ".config"
+		}
+		return getFS([]file{{
+			filepath.Join(
+				confDir,
+				"loadimpact",
+				"k6",
+				defaultConfigFileName,
+			),
+			jsonConfig,
+		}})
+	}
 	I := null.IntFrom // shortcut for "Valid" (i.e. user-specified) ints
 	// This is a function, because some of these test cases actually need for the init() functions
 	// to be executed, since they depend on defaultConfigFilePath
@@ -240,7 +243,8 @@ func getConfigConsolidationTestCases() []configConsolidationTestCase {
 		},
 		{opts{cli: []string{"-u", "1", "-i", "6", "-d", "10s"}}, exp{}, func(t *testing.T, c Config) {
 			verifySharedIters(I(1), I(6))(t, c)
-			sharedIterConfig := c.Scenarios[lib.DefaultScenarioName].(executor.SharedIterationsConfig)
+			sharedIterConfig, ok := c.Scenarios[lib.DefaultScenarioName].(executor.SharedIterationsConfig)
+			require.True(t, ok)
 			assert.Equal(t, sharedIterConfig.MaxDuration.TimeDuration(), 10*time.Second)
 		}},
 		// This should get a validation error since VUs are more than the shared iterations
@@ -533,18 +537,20 @@ func runTestCase(
 	t *testing.T,
 	testCase configConsolidationTestCase,
 	newFlagSet flagSetInit,
-	logHook *testutils.SimpleLogrusHook,
 ) {
+	t.Helper()
 	t.Logf("Test with opts=%#v and exp=%#v\n", testCase.options, testCase.expected)
 	output := testutils.NewTestOutput(t)
-	logrus.SetOutput(output)
+	logHook := &testutils.SimpleLogrusHook{
+		HookedLevels: []logrus.Level{logrus.WarnLevel},
+	}
+
 	logHook.Drain()
+	logger := logrus.New()
+	logger.AddHook(logHook)
+	logger.SetOutput(output)
 
-	restoreEnv := testutils.SetEnv(t, testCase.options.env)
-	defer restoreEnv()
-
-	flagSet := newFlagSet()
-	defer resetStickyGlobalVars()
+	flagSet, globalFlags := newFlagSet()
 	flagSet.SetOutput(output)
 	// flagSet.PrintDefaults()
 
@@ -579,8 +585,9 @@ func runTestCase(
 		t.Logf("Creating an empty FS for this test")
 		testCase.options.fs = afero.NewMemMapFs() // create an empty FS if it wasn't supplied
 	}
-
-	consolidatedConfig, err := getConsolidatedConfig(testCase.options.fs, cliConf, runnerOpts)
+	consolidatedConfig, err := getConsolidatedConfig(testCase.options.fs, cliConf, runnerOpts,
+		// TODO: just make testcase.options.env in map[string]string
+		buildEnvMap(testCase.options.env), globalFlags)
 	if testCase.expected.consolidationError {
 		require.Error(t, err)
 		return
@@ -588,15 +595,14 @@ func runTestCase(
 	require.NoError(t, err)
 
 	derivedConfig := consolidatedConfig
-	derivedConfig.Options, err = executor.DeriveScenariosFromShortcuts(consolidatedConfig.Options)
+	derivedConfig.Options, err = executor.DeriveScenariosFromShortcuts(consolidatedConfig.Options, logger)
 	if testCase.expected.derivationError {
 		require.Error(t, err)
 		return
 	}
 	require.NoError(t, err)
 
-	warnings := logHook.Drain()
-	if testCase.expected.logWarning {
+	if warnings := logHook.Drain(); testCase.expected.logWarning {
 		assert.NotEmpty(t, warnings)
 	} else {
 		assert.Empty(t, warnings)
@@ -615,25 +621,22 @@ func runTestCase(
 }
 
 func TestConfigConsolidation(t *testing.T) {
-	// This test and its subtests shouldn't be ran in parallel, since they unfortunately have
-	// to mess with shared global objects (env vars, variables, the log, ... santa?)
-	logHook := testutils.SimpleLogrusHook{HookedLevels: []logrus.Level{logrus.WarnLevel}}
-	logrus.AddHook(&logHook)
-	logrus.SetOutput(ioutil.Discard)
-	defer logrus.SetOutput(os.Stderr)
+	t.Parallel()
 
 	for tcNum, testCase := range getConfigConsolidationTestCases() {
+		tcNum, testCase := tcNum, testCase
 		flagSetInits := testCase.options.cliFlagSetInits
 		if flagSetInits == nil { // handle the most common case
 			flagSetInits = mostFlagSets()
 		}
 		for fsNum, flagSet := range flagSetInits {
-			// I want to paralelize this, but I cannot... due to global variables and other
-			// questionable architectural choices... :|
-			testCase, flagSet := testCase, flagSet
+			fsNum, flagSet := fsNum, flagSet
 			t.Run(
 				fmt.Sprintf("TestCase#%d_FlagSet#%d", tcNum, fsNum),
-				func(t *testing.T) { runTestCase(t, testCase, flagSet, &logHook) },
+				func(t *testing.T) {
+					t.Parallel()
+					runTestCase(t, testCase, flagSet)
+				},
 			)
 		}
 	}

@@ -57,13 +57,6 @@ func Register(name string, mod interface{}) {
 	modules[name] = mod
 }
 
-// HasModuleInstancePerVU should be implemented by all native Golang modules that
-// would require per-VU state. k6 will call their NewModuleInstancePerVU() methods
-// every time a VU imports the module and use its result as the returned object.
-type HasModuleInstancePerVU interface {
-	NewModuleInstancePerVU() interface{}
-}
-
 // Module is the interface js modules should implement in order to get access to the VU
 type Module interface {
 	// NewModuleInstance will get modules.VU that should provide the module with a way to interact with the VU
@@ -114,6 +107,24 @@ type VU interface {
 
 	// Runtime returns the goja.Runtime for the current VU
 	Runtime() *goja.Runtime
+
+	// RegisterCallback lets a module declare that it wants to run a function on the event loop *at a later point in time*.
+	// It needs to be called from within the event loop, so not in a goroutine spawned by a module.
+	// Its result can be called with a function that will be executed *on the event loop* -
+	// possibly letting you call RegisterCallback again.
+	// Calling the result can be done at any time. The event loop will block until that happens, (if it doesn't
+	// have something else to run) so in the event of an iteration end or abort (for example due to an exception),
+	// It is the module responsibility to monitor the context and abort on it being done.
+	// This still means that the returned function here *needs* to be called to signal that the module
+	// has aborted the operation and will not do anything more, not doing so will block k6.
+	//
+	// Experimental
+	//
+	// Notice: This API is EXPERIMENTAL and may be changed or removed in a later release.
+	RegisterCallback() func(func() error)
+
+	// sealing field will help probably with pointing users that they just need to embed this in their Instance
+	// implementations
 }
 
 // Exports is representation of ESM exports of a module

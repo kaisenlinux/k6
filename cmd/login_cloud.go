@@ -38,8 +38,8 @@ import (
 	"go.k6.io/k6/ui"
 )
 
-//nolint:funlen
-func getLoginCloudCommand(logger logrus.FieldLogger) *cobra.Command {
+//nolint:funlen,gocognit
+func getLoginCloudCommand(logger logrus.FieldLogger, globalFlags *commandFlags) *cobra.Command {
 	// loginCloudCommand represents the 'login cloud' command
 	loginCloudCommand := &cobra.Command{
 		Use:   "cloud",
@@ -60,7 +60,7 @@ This will set the default token used when just "k6 run -o cloud" is passed.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fs := afero.NewOsFs()
 
-			currentDiskConf, configPath, err := readDiskConfig(fs)
+			currentDiskConf, configPath, err := readDiskConfig(fs, globalFlags)
 			if err != nil {
 				return err
 			}
@@ -91,7 +91,7 @@ This will set the default token used when just "k6 run -o cloud" is passed.`,
 			switch {
 			case reset.Valid:
 				newCloudConf.Token = null.StringFromPtr(nil)
-				fprintf(stdout, "  token reset\n")
+				fprintf(globalFlags.stdout, "  token reset\n")
 			case show.Bool:
 			case token.Valid:
 				newCloudConf.Token = token
@@ -111,12 +111,13 @@ This will set the default token used when just "k6 run -o cloud" is passed.`,
 				if !term.IsTerminal(int(syscall.Stdin)) { // nolint: unconvert
 					logger.Warn("Stdin is not a terminal, falling back to plain text input")
 				}
-				vals, err := form.Run(os.Stdin, stdout)
+				var vals map[string]string
+				vals, err = form.Run(os.Stdin, globalFlags.stdout)
 				if err != nil {
 					return err
 				}
-				email := vals["Email"].(string)
-				password := vals["Password"].(string)
+				email := vals["Email"]
+				password := vals["Password"]
 
 				client := cloudapi.NewClient(
 					logger,
@@ -125,7 +126,8 @@ This will set the default token used when just "k6 run -o cloud" is passed.`,
 					consts.Version,
 					consolidatedCurrentConfig.Timeout.TimeDuration())
 
-				res, err := client.Login(email, password)
+				var res *cloudapi.LoginResponse
+				res, err = client.Login(email, password)
 				if err != nil {
 					return err
 				}
@@ -149,8 +151,8 @@ This will set the default token used when just "k6 run -o cloud" is passed.`,
 			}
 
 			if newCloudConf.Token.Valid {
-				valueColor := getColor(noColor || !stdoutTTY, color.FgCyan)
-				fprintf(stdout, "  token: %s\n", valueColor.Sprint(newCloudConf.Token.String))
+				valueColor := getColor(globalFlags.noColor || !globalFlags.stdoutTTY, color.FgCyan)
+				fprintf(globalFlags.stdout, "  token: %s\n", valueColor.Sprint(newCloudConf.Token.String))
 			}
 			return nil
 		},

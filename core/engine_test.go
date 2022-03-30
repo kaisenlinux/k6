@@ -65,16 +65,15 @@ func newTestEngine( //nolint:golint
 		runCtx, runCancel = context.WithCancel(globalCtx)
 	}
 
+	logger := logrus.New()
+	logger.SetOutput(testutils.NewTestOutput(t))
 	newOpts, err := executor.DeriveScenariosFromShortcuts(lib.Options{
 		MetricSamplesBufferSize: null.NewInt(200, false),
-	}.Apply(runner.GetOptions()).Apply(opts))
+	}.Apply(runner.GetOptions()).Apply(opts), logger)
 	require.NoError(t, err)
 	require.Empty(t, newOpts.Validate())
 
 	require.NoError(t, runner.SetOptions(newOpts))
-
-	logger := logrus.New()
-	logger.SetOutput(testutils.NewTestOutput(t))
 
 	execScheduler, err := local.NewExecutionScheduler(runner, logger)
 	require.NoError(t, err)
@@ -107,11 +106,13 @@ func TestEngineRun(t *testing.T) {
 	t.Run("exits with context", func(t *testing.T) {
 		t.Parallel()
 		done := make(chan struct{})
-		runner := &minirunner.MiniRunner{Fn: func(ctx context.Context, out chan<- stats.SampleContainer) error {
-			<-ctx.Done()
-			close(done)
-			return nil
-		}}
+		runner := &minirunner.MiniRunner{
+			Fn: func(ctx context.Context, _ *lib.State, _ chan<- stats.SampleContainer) error {
+				<-ctx.Done()
+				close(done)
+				return nil
+			},
+		}
 
 		duration := 100 * time.Millisecond
 		ctx, cancel := context.WithTimeout(context.Background(), duration)
@@ -142,13 +143,15 @@ func TestEngineRun(t *testing.T) {
 
 		signalChan := make(chan interface{})
 
-		runner := &minirunner.MiniRunner{Fn: func(ctx context.Context, out chan<- stats.SampleContainer) error {
-			stats.PushIfNotDone(ctx, out, stats.Sample{Metric: testMetric, Time: time.Now(), Value: 1})
-			close(signalChan)
-			<-ctx.Done()
-			stats.PushIfNotDone(ctx, out, stats.Sample{Metric: testMetric, Time: time.Now(), Value: 1})
-			return nil
-		}}
+		runner := &minirunner.MiniRunner{
+			Fn: func(ctx context.Context, _ *lib.State, out chan<- stats.SampleContainer) error {
+				stats.PushIfNotDone(ctx, out, stats.Sample{Metric: testMetric, Time: time.Now(), Value: 1})
+				close(signalChan)
+				<-ctx.Done()
+				stats.PushIfNotDone(ctx, out, stats.Sample{Metric: testMetric, Time: time.Now(), Value: 1})
+				return nil
+			},
+		}
 
 		mockOutput := mockoutput.New()
 		ctx, cancel := context.WithCancel(context.Background())
@@ -210,10 +213,12 @@ func TestEngineOutput(t *testing.T) {
 	t.Parallel()
 	testMetric := stats.New("test_metric", stats.Trend)
 
-	runner := &minirunner.MiniRunner{Fn: func(ctx context.Context, out chan<- stats.SampleContainer) error {
-		out <- stats.Sample{Metric: testMetric}
-		return nil
-	}}
+	runner := &minirunner.MiniRunner{
+		Fn: func(ctx context.Context, _ *lib.State, out chan<- stats.SampleContainer) error {
+			out <- stats.Sample{Metric: testMetric}
+			return nil
+		},
+	}
 
 	mockOutput := mockoutput.New()
 	e, run, wait := newTestEngine(t, nil, runner, []output.Output{mockOutput}, lib.Options{
@@ -258,8 +263,9 @@ func TestEngine_processSamples(t *testing.T) {
 	})
 	t.Run("submetric", func(t *testing.T) {
 		t.Parallel()
-		ths, err := stats.NewThresholds([]string{`1+1==2`})
-		assert.NoError(t, err)
+		ths := stats.NewThresholds([]string{`value<2`})
+		gotParseErr := ths.Parse()
+		require.NoError(t, gotParseErr)
 
 		e, _, wait := newTestEngine(t, nil, nil, nil, lib.Options{
 			Thresholds: map[string]stats.Thresholds{
@@ -286,8 +292,12 @@ func TestEngineThresholdsWillAbort(t *testing.T) {
 	t.Parallel()
 	metric := stats.New("my_metric", stats.Gauge)
 
-	ths, err := stats.NewThresholds([]string{"1+1==3"})
-	assert.NoError(t, err)
+	// The incoming samples for the metric set it to 1.25. Considering
+	// the metric is of type Gauge, value > 1.25 should always fail, and
+	// trigger an abort.
+	ths := stats.NewThresholds([]string{"value>1.25"})
+	gotParseErr := ths.Parse()
+	require.NoError(t, gotParseErr)
 	ths.Thresholds[0].AbortOnFail = true
 
 	thresholds := map[string]stats.Thresholds{metric.Name: ths}
@@ -305,19 +315,26 @@ func TestEngineAbortedByThresholds(t *testing.T) {
 	t.Parallel()
 	metric := stats.New("my_metric", stats.Gauge)
 
-	ths, err := stats.NewThresholds([]string{"1+1==3"})
-	assert.NoError(t, err)
+	// The MiniRunner sets the value of the metric to 1.25. Considering
+	// the metric is of type Gauge, value > 1.25 should always fail, and
+	// trigger an abort.
+	// **N.B**: a threshold returning an error, won't trigger an abort.
+	ths := stats.NewThresholds([]string{"value>1.25"})
+	gotParseErr := ths.Parse()
+	require.NoError(t, gotParseErr)
 	ths.Thresholds[0].AbortOnFail = true
 
 	thresholds := map[string]stats.Thresholds{metric.Name: ths}
 
 	done := make(chan struct{})
-	runner := &minirunner.MiniRunner{Fn: func(ctx context.Context, out chan<- stats.SampleContainer) error {
-		out <- stats.Sample{Metric: metric, Value: 1.25, Tags: stats.IntoSampleTags(&map[string]string{"a": "1"})}
-		<-ctx.Done()
-		close(done)
-		return nil
-	}}
+	runner := &minirunner.MiniRunner{
+		Fn: func(ctx context.Context, _ *lib.State, out chan<- stats.SampleContainer) error {
+			out <- stats.Sample{Metric: metric, Value: 1.25, Tags: stats.IntoSampleTags(&map[string]string{"a": "1"})}
+			<-ctx.Done()
+			close(done)
+			return nil
+		},
+	}
 
 	_, run, wait := newTestEngine(t, nil, runner, nil, lib.Options{Thresholds: thresholds})
 	defer wait()
@@ -343,14 +360,14 @@ func TestEngine_processThresholds(t *testing.T) {
 		ths   map[string][]string
 		abort bool
 	}{
-		"passing":  {true, map[string][]string{"my_metric": {"1+1==2"}}, false},
-		"failing":  {false, map[string][]string{"my_metric": {"1+1==3"}}, false},
-		"aborting": {false, map[string][]string{"my_metric": {"1+1==3"}}, true},
+		"passing":  {true, map[string][]string{"my_metric": {"value<2"}}, false},
+		"failing":  {false, map[string][]string{"my_metric": {"value>1.25"}}, false},
+		"aborting": {false, map[string][]string{"my_metric": {"value>1.25"}}, true},
 
-		"submetric,match,passing":   {true, map[string][]string{"my_metric{a:1}": {"1+1==2"}}, false},
-		"submetric,match,failing":   {false, map[string][]string{"my_metric{a:1}": {"1+1==3"}}, false},
-		"submetric,nomatch,passing": {true, map[string][]string{"my_metric{a:2}": {"1+1==2"}}, false},
-		"submetric,nomatch,failing": {true, map[string][]string{"my_metric{a:2}": {"1+1==3"}}, false},
+		"submetric,match,passing":   {true, map[string][]string{"my_metric{a:1}": {"value<2"}}, false},
+		"submetric,match,failing":   {false, map[string][]string{"my_metric{a:1}": {"value>1.25"}}, false},
+		"submetric,nomatch,passing": {true, map[string][]string{"my_metric{a:2}": {"value<2"}}, false},
+		"submetric,nomatch,failing": {true, map[string][]string{"my_metric{a:2}": {"value>1.25"}}, false},
 	}
 
 	for name, data := range testdata {
@@ -359,8 +376,9 @@ func TestEngine_processThresholds(t *testing.T) {
 			t.Parallel()
 			thresholds := make(map[string]stats.Thresholds, len(data.ths))
 			for m, srcs := range data.ths {
-				ths, err := stats.NewThresholds(srcs)
-				assert.NoError(t, err)
+				ths := stats.NewThresholds(srcs)
+				gotParseErr := ths.Parse()
+				require.NoError(t, gotParseErr)
 				ths.Thresholds[0].AbortOnFail = data.abort
 				thresholds[m] = ths
 			}
@@ -820,7 +838,7 @@ func TestVuInitException(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	opts, err := executor.DeriveScenariosFromShortcuts(runner.GetOptions())
+	opts, err := executor.DeriveScenariosFromShortcuts(runner.GetOptions(), nil)
 	require.NoError(t, err)
 	require.Empty(t, opts.Validate())
 	require.NoError(t, runner.SetOptions(opts))
@@ -1115,7 +1133,7 @@ func TestEngineRunsTeardownEvenAfterTestRunIsAborted(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	runner := &minirunner.MiniRunner{
-		Fn: func(ctx context.Context, out chan<- stats.SampleContainer) error {
+		Fn: func(ctx context.Context, _ *lib.State, out chan<- stats.SampleContainer) error {
 			cancel() // we cancel the runCtx immediately after the test starts
 			return nil
 		},
@@ -1206,7 +1224,7 @@ func TestActiveVUsCount(t *testing.T) {
 
 	opts, err := executor.DeriveScenariosFromShortcuts(lib.Options{
 		MetricSamplesBufferSize: null.NewInt(200, false),
-	}.Apply(runner.GetOptions()))
+	}.Apply(runner.GetOptions()), nil)
 	require.NoError(t, err)
 	require.Empty(t, opts.Validate())
 	require.NoError(t, runner.SetOptions(opts))

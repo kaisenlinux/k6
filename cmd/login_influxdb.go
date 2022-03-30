@@ -36,7 +36,8 @@ import (
 	"go.k6.io/k6/ui"
 )
 
-func getLoginInfluxDBCommand(logger logrus.FieldLogger) *cobra.Command {
+//nolint:funlen
+func getLoginInfluxDBCommand(logger logrus.FieldLogger, globalFlags *commandFlags) *cobra.Command {
 	// loginInfluxDBCommand represents the 'login influxdb' command
 	loginInfluxDBCommand := &cobra.Command{
 		Use:   "influxdb [uri]",
@@ -47,7 +48,7 @@ This will set the default server used when just "-o influxdb" is passed.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fs := afero.NewOsFs()
-			config, configPath, err := readDiskConfig(fs)
+			config, configPath, err := readDiskConfig(fs, globalFlags)
 			if err != nil {
 				return err
 			}
@@ -95,15 +96,15 @@ This will set the default server used when just "-o influxdb" is passed.`,
 			if !term.IsTerminal(int(syscall.Stdin)) { // nolint: unconvert
 				logger.Warn("Stdin is not a terminal, falling back to plain text input")
 			}
-			vals, err := form.Run(os.Stdin, stdout)
+			vals, err := form.Run(os.Stdin, globalFlags.stdout)
 			if err != nil {
 				return err
 			}
 
-			conf.Addr = null.StringFrom(vals["Addr"].(string))
-			conf.DB = null.StringFrom(vals["DB"].(string))
-			conf.Username = null.StringFrom(vals["Username"].(string))
-			conf.Password = null.StringFrom(vals["Password"].(string))
+			conf.Addr = null.StringFrom(vals["Addr"])
+			conf.DB = null.StringFrom(vals["DB"])
+			conf.Username = null.StringFrom(vals["Username"])
+			conf.Password = null.StringFrom(vals["Password"])
 
 			client, err := influxdb.MakeClient(conf)
 			if err != nil {

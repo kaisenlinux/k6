@@ -35,7 +35,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
-	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -62,7 +61,7 @@ var _ io.Writer = mockWriter{}
 
 func getFiles(t *testing.T, fs afero.Fs) map[string]*bytes.Buffer {
 	result := map[string]*bytes.Buffer{}
-	walkFn := func(filePath string, info os.FileInfo, err error) error {
+	walkFn := func(filePath string, _ os.FileInfo, err error) error {
 		if filePath == "/" || filePath == "\\" {
 			return nil
 		}
@@ -135,9 +134,8 @@ func TestHandleSummaryResultError(t *testing.T) {
 	assertEqual(t, "file summary 2", files[filePath2])
 }
 
-func TestAbortTest(t *testing.T) { //nolint: tparallel
+func TestAbortTest(t *testing.T) {
 	t.Parallel()
-
 	testCases := []struct {
 		testFilename, expLogOutput string
 	}{
@@ -156,9 +154,10 @@ func TestAbortTest(t *testing.T) { //nolint: tparallel
 		},
 	}
 
-	for _, tc := range testCases { //nolint: paralleltest
+	for _, tc := range testCases {
 		tc := tc
 		t.Run(tc.testFilename, func(t *testing.T) {
+			t.Parallel()
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
@@ -170,12 +169,7 @@ func TestAbortTest(t *testing.T) { //nolint: tparallel
 			}
 			logger.AddHook(&hook)
 
-			cmd := getRunCmd(ctx, logger)
-			// Redefine the flag to avoid a nil pointer panic on lookup.
-			cmd.Flags().AddFlag(&pflag.Flag{
-				Name:   "address",
-				Hidden: true,
-			})
+			cmd := getRunCmd(ctx, logger, newCommandFlags())
 			a, err := filepath.Abs(path.Join("testdata", tc.testFilename))
 			require.NoError(t, err)
 			cmd.SetArgs([]string{a})
@@ -200,12 +194,13 @@ func TestAbortTest(t *testing.T) { //nolint: tparallel
 	}
 }
 
-func TestInitErrExitCode(t *testing.T) { //nolint: paralleltest
+func TestInitErrExitCode(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	logger := testutils.NewLogger(t)
 
-	cmd := getRunCmd(ctx, logger)
+	cmd := getRunCmd(ctx, logger, newCommandFlags())
 	a, err := filepath.Abs("testdata/initerr.js")
 	require.NoError(t, err)
 	cmd.SetArgs([]string{a})
@@ -215,4 +210,64 @@ func TestInitErrExitCode(t *testing.T) { //nolint: paralleltest
 	assert.Equalf(t, exitcodes.ScriptException, e.ExitCode(),
 		"Status code must be %d", exitcodes.ScriptException)
 	assert.Contains(t, err.Error(), "ReferenceError: someUndefinedVar is not defined")
+}
+
+func TestRunThresholds(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name         string
+		noThresholds bool
+		testFilename string
+
+		wantErr bool
+	}{
+		{
+			name:         "run should fail with exit status 104 on a malformed threshold expression",
+			noThresholds: false,
+			testFilename: "testdata/thresholds/malformed_expression.js",
+			wantErr:      true,
+		},
+		{
+			name:         "run should on a malformed threshold expression but --no-thresholds flag set",
+			noThresholds: true,
+			testFilename: "testdata/thresholds/malformed_expression.js",
+			wantErr:      false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cmd := getRunCmd(ctx, testutils.NewLogger(t), newCommandFlags())
+			filename, err := filepath.Abs(testCase.testFilename)
+			require.NoError(t, err)
+			args := []string{filename}
+			if testCase.noThresholds {
+				args = append(args, "--no-thresholds")
+			}
+			cmd.SetArgs(args)
+			wantExitCode := exitcodes.InvalidConfig
+
+			var gotErrExt errext.HasExitCode
+			gotErr := cmd.Execute()
+
+			assert.Equal(t,
+				testCase.wantErr,
+				gotErr != nil,
+				"run command error = %v, wantErr %v", gotErr, testCase.wantErr,
+			)
+
+			if testCase.wantErr {
+				require.ErrorAs(t, gotErr, &gotErrExt)
+				assert.Equalf(t, wantExitCode, gotErrExt.ExitCode(),
+					"status code must be %d", wantExitCode,
+				)
+			}
+		})
+	}
 }

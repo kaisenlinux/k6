@@ -26,6 +26,7 @@ import (
 	"io/ioutil"
 	"path/filepath"
 
+	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"gopkg.in/guregu/null.v3"
 
@@ -33,24 +34,21 @@ import (
 	"go.k6.io/k6/lib"
 )
 
-// TODO: fix this... or remove k6 convert
-//nolint: gochecknoglobals
-var (
-	convertOutput       string
-	optionsFilePath     string
-	minSleep            uint
-	maxSleep            uint
-	enableChecks        bool
-	returnOnFailedCheck bool
-	correlate           bool
-	threshold           uint
-	nobatch             bool
-	only                []string
-	skip                []string
-)
-
 //nolint:funlen,gocognit
-func getConvertCmd() *cobra.Command {
+func getConvertCmd(defaultFs afero.Fs, defaultWriter io.Writer) *cobra.Command {
+	var (
+		convertOutput       string
+		optionsFilePath     string
+		minSleep            uint
+		maxSleep            uint
+		enableChecks        bool
+		returnOnFailedCheck bool
+		correlate           bool
+		threshold           uint
+		nobatch             bool
+		only                []string
+		skip                []string
+	)
 	convertCmd := &cobra.Command{
 		Use:   "convert",
 		Short: "Convert a HAR file to a k6 script",
@@ -145,10 +143,10 @@ func getConvertCmd() *cobra.Command {
 	convertCmd.Flags().StringSliceVarP(&skip, "skip", "", []string{}, "skip requests from the given domains")
 	convertCmd.Flags().UintVarP(&threshold, "batch-threshold", "", 500, "batch request idle time threshold (see example)")
 	convertCmd.Flags().BoolVarP(&nobatch, "no-batch", "", false, "don't generate batch calls")
-	convertCmd.Flags().BoolVarP(&enableChecks, "enable-status-code-checks", "", false, "add a status code check for each HTTP response")
-	convertCmd.Flags().BoolVarP(&returnOnFailedCheck, "return-on-failed-check", "", false, "return from iteration if we get an unexpected response status code")
-	convertCmd.Flags().BoolVarP(&correlate, "correlate", "", false, "detect values in responses being used in subsequent requests and try adapt the script accordingly (only redirects and JSON values for now)")
-	convertCmd.Flags().UintVarP(&minSleep, "min-sleep", "", 20, "the minimum amount of seconds to sleep after each iteration")
-	convertCmd.Flags().UintVarP(&maxSleep, "max-sleep", "", 40, "the maximum amount of seconds to sleep after each iteration")
+	convertCmd.Flags().BoolVarP(&enableChecks, "enable-status-code-checks", "", false, "add a status code check for each HTTP response")                                                                          //nolint:lll
+	convertCmd.Flags().BoolVarP(&returnOnFailedCheck, "return-on-failed-check", "", false, "return from iteration if we get an unexpected response status code")                                                  //nolint:lll
+	convertCmd.Flags().BoolVarP(&correlate, "correlate", "", false, "detect values in responses being used in subsequent requests and try adapt the script accordingly (only redirects and JSON values for now)") //nolint:lll
+	convertCmd.Flags().UintVarP(&minSleep, "min-sleep", "", 20, "the minimum amount of seconds to sleep after each iteration")                                                                                    //nolint:lll
+	convertCmd.Flags().UintVarP(&maxSleep, "max-sleep", "", 40, "the maximum amount of seconds to sleep after each iteration")                                                                                    //nolint:lll
 	return convertCmd
 }
