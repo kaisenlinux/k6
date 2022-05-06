@@ -30,9 +30,8 @@ import (
 	"gopkg.in/guregu/null.v3"
 
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/ui/pb"
 )
 
@@ -73,7 +72,7 @@ var _ lib.ExecutorConfig = &ConstantVUsConfig{}
 
 // GetVUs returns the scaled VUs for the executor.
 func (clvc ConstantVUsConfig) GetVUs(et *lib.ExecutionTuple) int64 {
-	return et.Segment.Scale(clvc.VUs.Int64)
+	return et.ScaleInt64(clvc.VUs.Int64)
 }
 
 // GetDescription returns a human-readable description of the executor options
@@ -86,14 +85,14 @@ func (clvc ConstantVUsConfig) GetDescription(et *lib.ExecutionTuple) string {
 func (clvc ConstantVUsConfig) Validate() []error {
 	errors := clvc.BaseConfig.Validate()
 	if clvc.VUs.Int64 <= 0 {
-		errors = append(errors, fmt.Errorf("the number of VUs should be more than 0"))
+		errors = append(errors, fmt.Errorf("the number of VUs must be more than 0"))
 	}
 
 	if !clvc.Duration.Valid {
 		errors = append(errors, fmt.Errorf("the duration is unspecified"))
 	} else if clvc.Duration.TimeDuration() < minDuration {
 		errors = append(errors, fmt.Errorf(
-			"the duration should be at least %s, but is %s", minDuration, clvc.Duration,
+			"the duration must be at least %s, but is %s", minDuration, clvc.Duration,
 		))
 	}
 
@@ -143,9 +142,7 @@ var _ lib.Executor = &ConstantVUs{}
 
 // Run constantly loops through as many iterations as possible on a fixed number
 // of VUs for the specified duration.
-func (clv ConstantVUs) Run(
-	parentCtx context.Context, out chan<- stats.SampleContainer, _ *metrics.BuiltinMetrics,
-) (err error) {
+func (clv ConstantVUs) Run(parentCtx context.Context, out chan<- metrics.SampleContainer) (err error) {
 	numVUs := clv.config.GetVUs(clv.executionState.ExecutionTuple)
 	duration := clv.config.Duration.TimeDuration()
 	gracefulStop := clv.config.GetGracefulStop()

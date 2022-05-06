@@ -31,9 +31,8 @@ import (
 	"gopkg.in/guregu/null.v3"
 
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/ui/pb"
 )
 
@@ -97,19 +96,19 @@ func (sic SharedIterationsConfig) GetDescription(et *lib.ExecutionTuple) string 
 func (sic SharedIterationsConfig) Validate() []error {
 	errors := sic.BaseConfig.Validate()
 	if sic.VUs.Int64 <= 0 {
-		errors = append(errors, fmt.Errorf("the number of VUs should be more than 0"))
+		errors = append(errors, fmt.Errorf("the number of VUs must be more than 0"))
 	}
 
 	if sic.Iterations.Int64 < sic.VUs.Int64 {
 		errors = append(errors, fmt.Errorf(
-			"the number of iterations (%d) shouldn't be less than the number of VUs (%d)",
+			"the number of iterations (%d) can't be less than the number of VUs (%d)",
 			sic.Iterations.Int64, sic.VUs.Int64,
 		))
 	}
 
 	if sic.MaxDuration.TimeDuration() < minDuration {
 		errors = append(errors, fmt.Errorf(
-			"the maxDuration should be at least %s, but is %s", minDuration, sic.MaxDuration,
+			"the maxDuration must be at least %s, but is %s", minDuration, sic.MaxDuration,
 		))
 	}
 
@@ -184,9 +183,7 @@ func (si *SharedIterations) Init(ctx context.Context) error {
 // Run executes a specific total number of iterations, which are all shared by
 // the configured VUs.
 // nolint:funlen
-func (si SharedIterations) Run(
-	parentCtx context.Context, out chan<- stats.SampleContainer, builtinMetrics *metrics.BuiltinMetrics,
-) (err error) {
+func (si SharedIterations) Run(parentCtx context.Context, out chan<- metrics.SampleContainer) (err error) {
 	numVUs := si.config.GetVUs(si.executionState.ExecutionTuple)
 	iterations := si.et.ScaleInt64(si.config.Iterations.Int64)
 	duration := si.config.MaxDuration.TimeDuration()
@@ -226,9 +223,10 @@ func (si SharedIterations) Run(
 	defer func() {
 		activeVUs.Wait()
 		if attemptedIters < totalIters {
-			stats.PushIfNotDone(parentCtx, out, stats.Sample{
-				Value: float64(totalIters - attemptedIters), Metric: builtinMetrics.DroppedIterations,
-				Tags: si.getMetricTags(nil), Time: time.Now(),
+			metrics.PushIfNotDone(parentCtx, out, metrics.Sample{
+				Value:  float64(totalIters - attemptedIters),
+				Metric: si.executionState.BuiltinMetrics.DroppedIterations,
+				Tags:   si.getMetricTags(nil), Time: time.Now(),
 			})
 		}
 	}()

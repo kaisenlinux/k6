@@ -28,7 +28,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 
 	"github.com/dop251/goja"
 	"github.com/sirupsen/logrus"
@@ -36,6 +35,7 @@ import (
 
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/compiler"
+	"go.k6.io/k6/js/eventloop"
 	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/js/modules/k6"
 	"go.k6.io/k6/js/modules/k6/crypto"
@@ -43,7 +43,6 @@ import (
 	"go.k6.io/k6/js/modules/k6/data"
 	"go.k6.io/k6/js/modules/k6/encoding"
 	"go.k6.io/k6/js/modules/k6/execution"
-	"go.k6.io/k6/js/modules/k6/experimental"
 	"go.k6.io/k6/js/modules/k6/grpc"
 	"go.k6.io/k6/js/modules/k6/html"
 	"go.k6.io/k6/js/modules/k6/http"
@@ -100,7 +99,8 @@ func NewInitContext(
 		logger:            logger,
 		modules:           getJSModules(),
 		moduleVUImpl: &moduleVUImpl{
-			ctxPtr: ctxPtr, runtime: rt,
+			ctx:     *ctxPtr,
+			runtime: rt,
 		},
 	}
 }
@@ -152,21 +152,21 @@ func (i *InitContext) Require(arg string) goja.Value {
 }
 
 type moduleVUImpl struct {
-	ctxPtr    *context.Context
+	ctx       context.Context
 	initEnv   *common.InitEnvironment
 	state     *lib.State
 	runtime   *goja.Runtime
-	eventLoop *eventLoop
+	eventLoop *eventloop.EventLoop
 }
 
 func newModuleVUImpl() *moduleVUImpl {
 	return &moduleVUImpl{
-		ctxPtr: new(context.Context),
+		ctx: context.Background(),
 	}
 }
 
 func (m *moduleVUImpl) Context() context.Context {
-	return *m.ctxPtr
+	return m.ctx
 }
 
 func (m *moduleVUImpl) InitEnv() *common.InitEnvironment {
@@ -182,7 +182,7 @@ func (m *moduleVUImpl) Runtime() *goja.Runtime {
 }
 
 func (m *moduleVUImpl) RegisterCallback() func(func() error) {
-	return m.eventLoop.registerCallback()
+	return m.eventLoop.RegisterCallback()
 }
 
 /* This is here to illustrate how to use RegisterCallback to get a promise to work with the event loop
@@ -227,9 +227,6 @@ func toESModuleExports(exp modules.Exports) interface{} {
 	return result
 }
 
-// TODO: https://github.com/grafana/k6/issues/2385
-var onceBindWarning sync.Once //nolint: gochecknoglobals
-
 func (i *InitContext) requireModule(name string) (goja.Value, error) {
 	mod, ok := i.modules[name]
 	if !ok {
@@ -240,13 +237,7 @@ func (i *InitContext) requireModule(name string) (goja.Value, error) {
 		return i.moduleVUImpl.runtime.ToValue(toESModuleExports(instance.Exports())), nil
 	}
 
-	onceBindWarning.Do(func() {
-		i.logger.Warnf(`Module '%s' is using deprecated APIs that will be removed in k6 v0.38.0,`+
-			` for more details on how to update it see`+
-			` https://k6.io/docs/extensions/guides/create-an-extension/#advanced-javascript-extension`, name)
-	})
-
-	return i.moduleVUImpl.runtime.ToValue(common.Bind(i.moduleVUImpl.runtime, mod, i.moduleVUImpl.ctxPtr)), nil
+	return i.moduleVUImpl.runtime.ToValue(mod), nil
 }
 
 func (i *InitContext) requireFile(name string) (goja.Value, error) {
@@ -384,18 +375,17 @@ func (i *InitContext) allowOnlyOpenedFiles() {
 
 func getInternalJSModules() map[string]interface{} {
 	return map[string]interface{}{
-		"k6":              k6.New(),
-		"k6/crypto":       crypto.New(),
-		"k6/crypto/x509":  x509.New(),
-		"k6/data":         data.New(),
-		"k6/encoding":     encoding.New(),
-		"k6/execution":    execution.New(),
-		"k6/net/grpc":     grpc.New(),
-		"k6/html":         html.New(),
-		"k6/http":         http.New(),
-		"k6/metrics":      metrics.New(),
-		"k6/ws":           ws.New(),
-		"k6/experimental": experimental.New(),
+		"k6":             k6.New(),
+		"k6/crypto":      crypto.New(),
+		"k6/crypto/x509": x509.New(),
+		"k6/data":        data.New(),
+		"k6/encoding":    encoding.New(),
+		"k6/execution":   execution.New(),
+		"k6/net/grpc":    grpc.New(),
+		"k6/html":        html.New(),
+		"k6/http":        http.New(),
+		"k6/metrics":     metrics.New(),
+		"k6/ws":          ws.New(),
 	}
 }
 

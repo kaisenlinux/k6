@@ -1,3 +1,10 @@
+k6 (0.38.0-1kaisen) kaisen-packages; urgency=medium
+
+  * Import 0.38.0 release
+  * Add completion for BASH and ZSH
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Fri, 06 May 2022 10:53:18 +0100
+
 k6 (0.37.0-1kaisen) kaisen-packages; urgency=medium
 
   * Import 0.37.0 release

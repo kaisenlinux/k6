@@ -1,14 +1,13 @@
 package cmd
 
 import (
+	"io/ioutil"
 	"path/filepath"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/spf13/afero"
 	"github.com/stretchr/testify/require"
-	"go.k6.io/k6/errext"
 	"go.k6.io/k6/errext/exitcodes"
-	"go.k6.io/k6/lib/testutils"
 )
 
 func TestArchiveThresholds(t *testing.T) {
@@ -33,6 +32,36 @@ func TestArchiveThresholds(t *testing.T) {
 			testFilename: "testdata/thresholds/malformed_expression.js",
 			wantErr:      false,
 		},
+		{
+			name:         "run should fail with exit status 104 on a threshold applied to a non existing metric",
+			noThresholds: false,
+			testFilename: "testdata/thresholds/non_existing_metric.js",
+			wantErr:      true,
+		},
+		{
+			name:         "run should succeed on a threshold applied to a non existing metric with the --no-thresholds flag set",
+			noThresholds: true,
+			testFilename: "testdata/thresholds/non_existing_metric.js",
+			wantErr:      false,
+		},
+		{
+			name:         "run should succeed on a threshold applied to a non existing submetric with the --no-thresholds flag set",
+			noThresholds: true,
+			testFilename: "testdata/thresholds/non_existing_metric.js",
+			wantErr:      false,
+		},
+		{
+			name:         "run should fail with exit status 104 on a threshold applying an unsupported aggregation method to a metric",
+			noThresholds: false,
+			testFilename: "testdata/thresholds/unsupported_aggregation_method.js",
+			wantErr:      true,
+		},
+		{
+			name:         "run should succeed on a threshold applying an unsupported aggregation method to a metric with the --no-thresholds flag set",
+			noThresholds: true,
+			testFilename: "testdata/thresholds/unsupported_aggregation_method.js",
+			wantErr:      false,
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -40,33 +69,20 @@ func TestArchiveThresholds(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			tmpPath := filepath.Join(t.TempDir(), "archive.tar")
-
-			cmd := getArchiveCmd(testutils.NewLogger(t), newCommandFlags())
-			filename, err := filepath.Abs(testCase.testFilename)
+			testScript, err := ioutil.ReadFile(testCase.testFilename)
 			require.NoError(t, err)
-			args := []string{filename, "--archive-out", tmpPath}
+
+			testState := newGlobalTestState(t)
+			require.NoError(t, afero.WriteFile(testState.fs, filepath.Join(testState.cwd, testCase.testFilename), testScript, 0o644))
+			testState.args = []string{"k6", "archive", testCase.testFilename}
 			if testCase.noThresholds {
-				args = append(args, "--no-thresholds")
+				testState.args = append(testState.args, "--no-thresholds")
 			}
-			cmd.SetArgs(args)
-			wantExitCode := exitcodes.InvalidConfig
-
-			var gotErrExt errext.HasExitCode
-			gotErr := cmd.Execute()
-
-			assert.Equal(t,
-				testCase.wantErr,
-				gotErr != nil,
-				"archive command error = %v, wantErr %v", gotErr, testCase.wantErr,
-			)
 
 			if testCase.wantErr {
-				require.ErrorAs(t, gotErr, &gotErrExt)
-				assert.Equalf(t, wantExitCode, gotErrExt.ExitCode(),
-					"status code must be %d", wantExitCode,
-				)
+				testState.expectedExitCode = int(exitcodes.InvalidConfig)
 			}
+			newRootCommand(testState.globalState).execute()
 		})
 	}
 }

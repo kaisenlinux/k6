@@ -21,23 +21,16 @@
 package cmd
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
-	"os"
 
-	"github.com/sirupsen/logrus"
-	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 
-	"go.k6.io/k6/core/local"
-	"go.k6.io/k6/js"
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/lib/types"
 )
 
-func getInspectCmd(logger *logrus.Logger, globalFlags *commandFlags) *cobra.Command {
+// TODO: split apart like `k6 run` and `k6 archive`
+func getCmdInspect(gs *globalState) *cobra.Command {
 	var addExecReqs bool
 
 	// inspectCmd represents the inspect command
@@ -47,55 +40,29 @@ func getInspectCmd(logger *logrus.Logger, globalFlags *commandFlags) *cobra.Comm
 		Long:  `Inspect a script or archive.`,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			src, filesystems, err := readSource(args[0], logger)
+			test, err := loadAndConfigureTest(gs, cmd, args, nil)
 			if err != nil {
 				return err
 			}
 
-			runtimeOptions, err := getRuntimeOptions(cmd.Flags(), buildEnvMap(os.Environ()))
-			if err != nil {
-				return err
-			}
-			registry := metrics.NewRegistry()
-			builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-
-			var b *js.Bundle
-			typ := globalFlags.runType
-			if typ == "" {
-				typ = detectType(src.Data)
-			}
-			switch typ {
-			// this is an exhaustive list
-			case typeArchive:
-				var arc *lib.Archive
-				arc, err = lib.ReadArchive(bytes.NewBuffer(src.Data))
-				if err != nil {
-					return err
-				}
-				b, err = js.NewBundleFromArchive(logger, arc, runtimeOptions, registry)
-
-			case typeJS:
-				b, err = js.NewBundle(logger, src, filesystems, runtimeOptions, registry)
-			}
-			if err != nil {
-				return err
-			}
-
-			// ATM, output can take 2 forms: standard (equal to lib.Options struct) and extended, with additional fields.
-			inspectOutput := interface{}(b.Options)
-
+			// At the moment, `k6 inspect` output can take 2 forms: standard
+			// (equal to the lib.Options struct) and extended, with additional
+			// fields with execution requirements.
+			var inspectOutput interface{}
 			if addExecReqs {
-				inspectOutput, err = addExecRequirements(b, builtinMetrics, registry, logger, globalFlags)
+				inspectOutput, err = inspectOutputWithExecRequirements(gs, cmd, test)
 				if err != nil {
 					return err
 				}
+			} else {
+				inspectOutput = test.initRunner.GetOptions()
 			}
 
 			data, err := json.MarshalIndent(inspectOutput, "", "  ")
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(data)) //nolint:forbidigo // yes we want to just print it
+			printToStdout(gs, string(data))
 
 			return nil
 		},
@@ -103,7 +70,6 @@ func getInspectCmd(logger *logrus.Logger, globalFlags *commandFlags) *cobra.Comm
 
 	inspectCmd.Flags().SortFlags = false
 	inspectCmd.Flags().AddFlagSet(runtimeOptionFlagSet(false))
-	inspectCmd.Flags().StringVarP(&globalFlags.runType, "type", "t", globalFlags.runType, "override file `type`, \"js\" or \"archive\"") //nolint:lll
 	inspectCmd.Flags().BoolVar(&addExecReqs,
 		"execution-requirements",
 		false,
@@ -112,37 +78,20 @@ func getInspectCmd(logger *logrus.Logger, globalFlags *commandFlags) *cobra.Comm
 	return inspectCmd
 }
 
-func addExecRequirements(b *js.Bundle,
-	builtinMetrics *metrics.BuiltinMetrics, registry *metrics.Registry,
-	logger *logrus.Logger, globalFlags *commandFlags) (interface{}, error) {
-	// TODO: after #1048 issue, consider rewriting this without a Runner:
-	// just creating ExecutionPlan directly from validated options
+// If --execution-requirements is enabled, this will consolidate the config,
+// derive the value of `scenarios` and calculate the max test duration and VUs.
+func inspectOutputWithExecRequirements(gs *globalState, cmd *cobra.Command, test *loadedTest) (interface{}, error) {
+	// we don't actually support CLI flags here, so we pass nil as the getter
+	if err := test.consolidateDeriveAndValidateConfig(gs, cmd, nil); err != nil {
+		return nil, err
+	}
 
-	runner, err := js.NewFromBundle(logger, b, builtinMetrics, registry)
+	et, err := lib.NewExecutionTuple(test.derivedConfig.ExecutionSegment, test.derivedConfig.ExecutionSegmentSequence)
 	if err != nil {
 		return nil, err
 	}
 
-	conf, err := getConsolidatedConfig(
-		afero.NewOsFs(), Config{}, runner.GetOptions(), buildEnvMap(os.Environ()), globalFlags)
-	if err != nil {
-		return nil, err
-	}
-
-	conf, err = deriveAndValidateConfig(conf, runner.IsExecutable, logger)
-	if err != nil {
-		return nil, err
-	}
-
-	if err = runner.SetOptions(conf.Options); err != nil {
-		return nil, err
-	}
-	execScheduler, err := local.NewExecutionScheduler(runner, logger)
-	if err != nil {
-		return nil, err
-	}
-
-	executionPlan := execScheduler.GetExecutionPlan()
+	executionPlan := test.derivedConfig.Scenarios.GetFullExecutionRequirements(et)
 	duration, _ := lib.GetEndOffset(executionPlan)
 
 	return struct {
@@ -150,7 +99,7 @@ func addExecRequirements(b *js.Bundle,
 		TotalDuration types.NullDuration `json:"totalDuration"`
 		MaxVUs        uint64             `json:"maxVUs"`
 	}{
-		conf.Options,
+		test.derivedConfig.Options,
 		types.NewNullDuration(duration, true),
 		lib.GetMaxPossibleVUs(executionPlan),
 	}, nil

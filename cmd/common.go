@@ -21,20 +21,16 @@
 package cmd
 
 import (
-	"archive/tar"
-	"bytes"
 	"fmt"
-	"io"
 	"os"
+	"syscall"
 
-	"github.com/sirupsen/logrus"
-	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"gopkg.in/guregu/null.v3"
 
+	"go.k6.io/k6/errext/exitcodes"
 	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/loader"
 )
 
 // Panic if the given error is not nil.
@@ -89,31 +85,41 @@ func exactArgsWithMsg(n int, msg string) cobra.PositionalArgs {
 	}
 }
 
-// readSource is a small wrapper around loader.ReadSource returning
-// result of the load and filesystems map
-func readSource(filename string, logger *logrus.Logger) (*loader.SourceData, map[string]afero.Fs, error) {
-	pwd, err := os.Getwd()
-	if err != nil {
-		return nil, nil, err
+func printToStdout(gs *globalState, s string) {
+	if _, err := fmt.Fprint(gs.stdOut, s); err != nil {
+		gs.logger.Errorf("could not print '%s' to stdout: %s", s, err.Error())
 	}
-
-	filesystems := loader.CreateFilesystems()
-	src, err := loader.ReadSource(logger, filename, pwd, filesystems, os.Stdin)
-	return src, filesystems, err
 }
 
-func detectType(data []byte) string {
-	if _, err := tar.NewReader(bytes.NewReader(data)).Next(); err == nil {
-		return typeArchive
-	}
-	return typeJS
-}
+// Trap Interrupts, SIGINTs and SIGTERMs and call the given.
+func handleTestAbortSignals(gs *globalState, gracefulStopHandler, onHardStop func(os.Signal)) (stop func()) {
+	sigC := make(chan os.Signal, 2)
+	done := make(chan struct{})
+	gs.signalNotify(sigC, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
-// fprintf panics when where's an error writing to the supplied io.Writer
-func fprintf(w io.Writer, format string, a ...interface{}) (n int) {
-	n, err := fmt.Fprintf(w, format, a...)
-	if err != nil {
-		panic(err.Error())
+	go func() {
+		select {
+		case sig := <-sigC:
+			gracefulStopHandler(sig)
+		case <-done:
+			return
+		}
+
+		select {
+		case sig := <-sigC:
+			if onHardStop != nil {
+				onHardStop(sig)
+			}
+			// If we get a second signal, we immediately exit, so something like
+			// https://github.com/k6io/k6/issues/971 never happens again
+			gs.osExit(int(exitcodes.ExternalAbort))
+		case <-done:
+			return
+		}
+	}()
+
+	return func() {
+		close(done)
+		gs.signalStop(sigC)
 	}
-	return n
 }

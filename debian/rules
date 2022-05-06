@@ -6,11 +6,16 @@ export GOPATH=$(CURDIR)/obj-x86_64-linux-gnu
 	dh $@ --buildsystem=golang
 
 override_dh_auto_build:
-	go get
-	go build
+	make build
+	mkdir -p $(CURDIR)/obj-x86_64-linux-gnu/bash/ $(CURDIR)/obj-x86_64-linux-gnu/zsh
+	$(CURDIR)/k6 completion bash > $(CURDIR)/obj-x86_64-linux-gnu/bash/k6
+	$(CURDIR)/k6 completion zsh > $(CURDIR)/obj-x86_64-linux-gnu/zsh/_k6
 
 override_dh_auto_test:
 	go test
 
 override_dh_auto_install:
 	dh_auto_install -- --no-source
+	mkdir -p $(CURDIR)/debian/k6/usr/share/bash-completion/completions/ $(CURDIR)/debian/k6/usr/share/zsh/vendor-completions/
+	cp $(CURDIR)/obj-x86_64-linux-gnu/bash/k6 $(CURDIR)/debian/k6/usr/share/bash-completion/completions/
+	cp $(CURDIR)/obj-x86_64-linux-gnu/zsh/_k6 $(CURDIR)/debian/k6/usr/share/zsh/vendor-completions/

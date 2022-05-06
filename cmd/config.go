@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/mstoykov/envconfig"
 	"github.com/sirupsen/logrus"
@@ -39,7 +40,7 @@ import (
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/executor"
 	"go.k6.io/k6/lib/types"
-	"go.k6.io/k6/stats"
+	"go.k6.io/k6/metrics"
 )
 
 // configFlagSet returns a FlagSet with the default run configuration flags.
@@ -91,6 +92,16 @@ func (c Config) Apply(cfg Config) Config {
 	return c
 }
 
+// Returns a Config but only parses the Options inside.
+func getPartialConfig(flags *pflag.FlagSet) (Config, error) {
+	opts, err := getOptions(flags)
+	if err != nil {
+		return Config{}, err
+	}
+
+	return Config{Options: opts}, nil
+}
+
 // Gets configuration from CLI flags.
 func getConfig(flags *pflag.FlagSet) (Config, error) {
 	opts, err := getOptions(flags)
@@ -109,51 +120,42 @@ func getConfig(flags *pflag.FlagSet) (Config, error) {
 	}, nil
 }
 
-// Reads the configuration file from the supplied filesystem and returns it and its path.
-// It will first try to see if the user explicitly specified a custom config file and will
-// try to read that. If there's a custom config specified and it couldn't be read or parsed,
-// an error will be returned.
-// If there's no custom config specified and no file exists in the default config path, it will
-// return an empty config struct, the default config location and *no* error.
-func readDiskConfig(fs afero.Fs, globalFlags *commandFlags) (Config, string, error) {
-	realConfigFilePath := globalFlags.configFilePath
-	if realConfigFilePath == "" {
-		// The user didn't specify K6_CONFIG or --config, use the default path
-		realConfigFilePath = globalFlags.defaultConfigFilePath
-	}
-
+// Reads the configuration file from the supplied filesystem and returns it or
+// an error. The only situation in which an error won't be returned is if the
+// user didn't explicitly specify a config file path and the default config file
+// doesn't exist.
+func readDiskConfig(globalState *globalState) (Config, error) {
 	// Try to see if the file exists in the supplied filesystem
-	if _, err := fs.Stat(realConfigFilePath); err != nil {
-		if os.IsNotExist(err) && globalFlags.configFilePath == "" {
+	if _, err := globalState.fs.Stat(globalState.flags.configFilePath); err != nil {
+		if os.IsNotExist(err) && globalState.flags.configFilePath == globalState.defaultFlags.configFilePath {
 			// If the file doesn't exist, but it was the default config file (i.e. the user
 			// didn't specify anything), silence the error
 			err = nil
 		}
-		return Config{}, realConfigFilePath, err
+		return Config{}, err
 	}
 
-	data, err := afero.ReadFile(fs, realConfigFilePath)
+	data, err := afero.ReadFile(globalState.fs, globalState.flags.configFilePath)
 	if err != nil {
-		return Config{}, realConfigFilePath, err
+		return Config{}, err
 	}
 	var conf Config
-	err = json.Unmarshal(data, &conf)
-	return conf, realConfigFilePath, err
+	return conf, json.Unmarshal(data, &conf)
 }
 
 // Serializes the configuration to a JSON file and writes it in the supplied
 // location on the supplied filesystem
-func writeDiskConfig(fs afero.Fs, configPath string, conf Config) error {
+func writeDiskConfig(globalState *globalState, conf Config) error {
 	data, err := json.MarshalIndent(conf, "", "  ")
 	if err != nil {
 		return err
 	}
 
-	if err := fs.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+	if err := globalState.fs.MkdirAll(filepath.Dir(globalState.flags.configFilePath), 0o755); err != nil {
 		return err
 	}
 
-	return afero.WriteFile(fs, configPath, data, 0o644)
+	return afero.WriteFile(globalState.fs, globalState.flags.configFilePath, data, 0o644)
 }
 
 // Reads configuration variables from the environment.
@@ -176,16 +178,14 @@ func readEnvConfig(envMap map[string]string) (Config, error) {
 // - set some defaults if they weren't previously specified
 // TODO: add better validation, more explicit default values and improve consistency between formats
 // TODO: accumulate all errors and differentiate between the layers?
-func getConsolidatedConfig(
-	fs afero.Fs, cliConf Config, runnerOpts lib.Options, envMap map[string]string, globalFlags *commandFlags,
-) (conf Config, err error) {
+func getConsolidatedConfig(globalState *globalState, cliConf Config, runnerOpts lib.Options) (conf Config, err error) {
 	// TODO: use errext.WithExitCodeIfNone(err, exitcodes.InvalidConfig) where it makes sense?
 
-	fileConf, _, err := readDiskConfig(fs, globalFlags)
+	fileConf, err := readDiskConfig(globalState)
 	if err != nil {
 		return conf, err
 	}
-	envConf, err := readEnvConfig(envMap)
+	envConf, err := readEnvConfig(globalState.envVars)
 	if err != nil {
 		return conf, err
 	}
@@ -202,7 +202,7 @@ func getConsolidatedConfig(
 	// for CLI flags in cmd.getOptions, in case other configuration sources
 	// (e.g. env vars) overrode our default value. This is not done in
 	// lib.Options.Validate to avoid circular imports.
-	if _, err = stats.GetResolversForTrendColumns(conf.SummaryTrendStats); err != nil {
+	if _, err = metrics.GetResolversForTrendColumns(conf.SummaryTrendStats); err != nil {
 		return conf, err
 	}
 
@@ -214,11 +214,11 @@ func getConsolidatedConfig(
 //
 // Note that if you add option default value here, also add it in command line argument help text.
 func applyDefault(conf Config) Config {
-	if conf.Options.SystemTags == nil {
-		conf.Options.SystemTags = &stats.DefaultSystemTagSet
+	if conf.SystemTags == nil {
+		conf.SystemTags = &metrics.DefaultSystemTagSet
 	}
-	if conf.Options.SummaryTrendStats == nil {
-		conf.Options.SummaryTrendStats = lib.DefaultSummaryTrendStats
+	if conf.SummaryTrendStats == nil {
+		conf.SummaryTrendStats = lib.DefaultSummaryTrendStats
 	}
 	defDNS := types.DefaultDNSConfig()
 	if !conf.DNS.TTL.Valid {
@@ -230,7 +230,12 @@ func applyDefault(conf Config) Config {
 	if !conf.DNS.Policy.Valid {
 		conf.DNS.Policy = defDNS.Policy
 	}
-
+	if !conf.SetupTimeout.Valid {
+		conf.SetupTimeout.Duration = types.Duration(60 * time.Second)
+	}
+	if !conf.TeardownTimeout.Valid {
+		conf.TeardownTimeout.Duration = types.Duration(60 * time.Second)
+	}
 	return conf
 }
 

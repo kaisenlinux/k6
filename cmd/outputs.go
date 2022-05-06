@@ -26,11 +26,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sirupsen/logrus"
-	"github.com/spf13/afero"
-
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/loader"
 	"go.k6.io/k6/output"
 	"go.k6.io/k6/output/cloud"
 	"go.k6.io/k6/output/csv"
@@ -81,29 +77,25 @@ func getPossibleIDList(constrs map[string]func(output.Params) (output.Output, er
 	return strings.Join(res, ", ")
 }
 
-func createOutputs(
-	outputFullArguments []string, src *loader.SourceData, conf Config, rtOpts lib.RuntimeOptions,
-	executionPlan []lib.ExecutionStep, osEnvironment map[string]string, logger logrus.FieldLogger,
-	globalFlags *commandFlags,
-) ([]output.Output, error) {
+func createOutputs(gs *globalState, test *loadedTest, executionPlan []lib.ExecutionStep) ([]output.Output, error) {
 	outputConstructors, err := getAllOutputConstructors()
 	if err != nil {
 		return nil, err
 	}
 	baseParams := output.Params{
-		ScriptPath:     src.URL,
-		Logger:         logger,
-		Environment:    osEnvironment,
-		StdOut:         globalFlags.stdout,
-		StdErr:         globalFlags.stderr,
-		FS:             afero.NewOsFs(),
-		ScriptOptions:  conf.Options,
-		RuntimeOptions: rtOpts,
+		ScriptPath:     test.source.URL,
+		Logger:         gs.logger,
+		Environment:    gs.envVars,
+		StdOut:         gs.stdOut,
+		StdErr:         gs.stdErr,
+		FS:             gs.fs,
+		ScriptOptions:  test.derivedConfig.Options,
+		RuntimeOptions: test.runtimeOptions,
 		ExecutionPlan:  executionPlan,
 	}
-	result := make([]output.Output, 0, len(outputFullArguments))
+	result := make([]output.Output, 0, len(test.derivedConfig.Out))
 
-	for _, outputFullArg := range outputFullArguments {
+	for _, outputFullArg := range test.derivedConfig.Out {
 		outputType, outputArg := parseOutputArgument(outputFullArg)
 		outputConstructor, ok := outputConstructors[outputType]
 		if !ok {
@@ -116,13 +108,22 @@ func createOutputs(
 		params := baseParams
 		params.OutputType = outputType
 		params.ConfigArgument = outputArg
-		params.JSONConfig = conf.Collectors[outputType]
+		params.JSONConfig = test.derivedConfig.Collectors[outputType]
 
-		output, err := outputConstructor(params)
+		out, err := outputConstructor(params)
 		if err != nil {
 			return nil, fmt.Errorf("could not create the '%s' output: %w", outputType, err)
 		}
-		result = append(result, output)
+
+		if thresholdOut, ok := out.(output.WithThresholds); ok {
+			thresholdOut.SetThresholds(test.derivedConfig.Thresholds)
+		}
+
+		if builtinMetricOut, ok := out.(output.WithBuiltinMetrics); ok {
+			builtinMetricOut.SetBuiltinMetrics(test.builtInMetrics)
+		}
+
+		result = append(result, out)
 	}
 
 	return result, nil

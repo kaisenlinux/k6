@@ -21,20 +21,62 @@
 package cmd
 
 import (
-	"os"
-
-	"github.com/sirupsen/logrus"
-	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-
-	"go.k6.io/k6/errext"
-	"go.k6.io/k6/errext/exitcodes"
-	"go.k6.io/k6/lib/metrics"
 )
 
-func getArchiveCmd(logger *logrus.Logger, globalFlags *commandFlags) *cobra.Command {
-	// archiveCmd represents the archive command
+// cmdArchive handles the `k6 archive` sub-command
+type cmdArchive struct {
+	gs *globalState
+
+	archiveOut string
+}
+
+func (c *cmdArchive) run(cmd *cobra.Command, args []string) error {
+	test, err := loadAndConfigureTest(c.gs, cmd, args, getPartialConfig)
+	if err != nil {
+		return err
+	}
+
+	// It's important to NOT set the derived options back to the runner
+	// here, only the consolidated ones. Otherwise, if the script used
+	// an execution shortcut option (e.g. `iterations` or `duration`),
+	// we will have multiple conflicting execution options since the
+	// derivation will set `scenarios` as well.
+	err = test.initRunner.SetOptions(test.consolidatedConfig.Options)
+	if err != nil {
+		return err
+	}
+
+	// Archive.
+	arc := test.initRunner.MakeArchive()
+	f, err := c.gs.fs.Create(c.archiveOut)
+	if err != nil {
+		return err
+	}
+
+	err = arc.Write(f)
+	if cerr := f.Close(); err == nil && cerr != nil {
+		err = cerr
+	}
+	return err
+}
+
+func (c *cmdArchive) flagSet() *pflag.FlagSet {
+	flags := pflag.NewFlagSet("", pflag.ContinueOnError)
+	flags.SortFlags = false
+	flags.AddFlagSet(optionFlagSet())
+	flags.AddFlagSet(runtimeOptionFlagSet(false))
+	flags.StringVarP(&c.archiveOut, "archive-out", "O", c.archiveOut, "archive output filename")
+	return flags
+}
+
+func getCmdArchive(gs *globalState) *cobra.Command {
+	c := &cmdArchive{
+		gs:         gs,
+		archiveOut: "archive.tar",
+	}
+
 	archiveCmd := &cobra.Command{
 		Use:   "archive",
 		Short: "Create an archive",
@@ -48,83 +90,11 @@ An archive is a fully self-contained test run, and can be executed identically e
   # Run the resulting archive.
   k6 run myarchive.tar`[1:],
 		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			src, filesystems, err := readSource(args[0], logger)
-			if err != nil {
-				return err
-			}
-
-			runtimeOptions, err := getRuntimeOptions(cmd.Flags(), buildEnvMap(os.Environ()))
-			if err != nil {
-				return err
-			}
-
-			registry := metrics.NewRegistry()
-			builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-			r, err := newRunner(logger, src, globalFlags.runType, filesystems, runtimeOptions, builtinMetrics, registry)
-			if err != nil {
-				return err
-			}
-
-			cliOpts, err := getOptions(cmd.Flags())
-			if err != nil {
-				return err
-			}
-			conf, err := getConsolidatedConfig(
-				afero.NewOsFs(), Config{Options: cliOpts}, r.GetOptions(), buildEnvMap(os.Environ()), globalFlags,
-			)
-			if err != nil {
-				return err
-			}
-
-			// Parse the thresholds, only if the --no-threshold flag is not set.
-			// If parsing the threshold expressions failed, consider it as an
-			// invalid configuration error.
-			if !runtimeOptions.NoThresholds.Bool {
-				for _, thresholds := range conf.Options.Thresholds {
-					err = thresholds.Parse()
-					if err != nil {
-						return errext.WithExitCodeIfNone(err, exitcodes.InvalidConfig)
-					}
-				}
-			}
-
-			_, err = deriveAndValidateConfig(conf, r.IsExecutable, logger)
-			if err != nil {
-				return err
-			}
-
-			err = r.SetOptions(conf.Options)
-			if err != nil {
-				return err
-			}
-
-			// Archive.
-			arc := r.MakeArchive()
-			f, err := os.Create(globalFlags.archiveOut)
-			if err != nil {
-				return err
-			}
-
-			err = arc.Write(f)
-			if cerr := f.Close(); err == nil && cerr != nil {
-				err = cerr
-			}
-			return err
-		},
+		RunE: c.run,
 	}
 
 	archiveCmd.Flags().SortFlags = false
-	archiveCmd.Flags().AddFlagSet(archiveCmdFlagSet(globalFlags))
+	archiveCmd.Flags().AddFlagSet(c.flagSet())
 
 	return archiveCmd
-}
-
-func archiveCmdFlagSet(globalFlags *commandFlags) *pflag.FlagSet {
-	flags := pflag.NewFlagSet("", pflag.ContinueOnError)
-	flags.SortFlags = false
-	flags.AddFlagSet(optionFlagSet())
-	flags.AddFlagSet(runtimeOptionFlagSet(false))
-	flags.StringVarP(&globalFlags.archiveOut, "archive-out", "O", globalFlags.archiveOut, "archive output filename")
-	return flags
 }

@@ -41,6 +41,8 @@ const (
 
 // RuntimeOptions are settings passed onto the goja JS runtime
 type RuntimeOptions struct {
+	TestType null.String `json:"-"`
+
 	// Whether to pass the actual system environment variables to the JS runtime
 	IncludeSystemEnvVars null.Bool `json:"includeSystemEnvVars"`
 
@@ -58,6 +60,7 @@ type RuntimeOptions struct {
 	NoThresholds  null.Bool   `json:"noThresholds"`
 	NoSummary     null.Bool   `json:"noSummary"`
 	SummaryExport null.String `json:"summaryExport"`
+	KeyWriter     null.String `json:"-"`
 }
 
 // ValidateCompatibilityMode checks if the provided val is a valid compatibility mode

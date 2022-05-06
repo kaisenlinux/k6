@@ -21,16 +21,20 @@
 package json
 
 import (
-	"compress/gzip"
-	stdlibjson "encoding/json"
+	"bufio"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
+	"github.com/klauspost/compress/gzip"
+
+	"github.com/mailru/easyjson/jwriter"
+
 	"github.com/sirupsen/logrus"
 
+	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/output"
-	"go.k6.io/k6/stats"
 )
 
 // TODO: add option for emitting proper JSON files (https://github.com/k6io/k6/issues/737)
@@ -45,10 +49,10 @@ type Output struct {
 
 	logger      logrus.FieldLogger
 	filename    string
-	encoder     *stdlibjson.Encoder
+	out         io.Writer
 	closeFn     func() error
 	seenMetrics map[string]struct{}
-	thresholds  map[string][]*stats.Threshold
+	thresholds  map[string][]*metrics.Threshold
 }
 
 // New returns a new JSON output.
@@ -78,31 +82,35 @@ func (o *Output) Start() error {
 	o.logger.Debug("Starting...")
 
 	if o.filename == "" || o.filename == "-" {
-		o.encoder = stdlibjson.NewEncoder(o.params.StdOut)
+		w := bufio.NewWriter(o.params.StdOut)
 		o.closeFn = func() error {
-			return nil
+			return w.Flush()
 		}
+		o.out = w
 	} else {
 		logfile, err := o.params.FS.Create(o.filename)
 		if err != nil {
 			return err
 		}
+		w := bufio.NewWriter(logfile)
 
 		if strings.HasSuffix(o.filename, ".gz") {
-			outfile := gzip.NewWriter(logfile)
+			outfile := gzip.NewWriter(w)
 
 			o.closeFn = func() error {
 				_ = outfile.Close()
+				_ = w.Flush()
 				return logfile.Close()
 			}
-			o.encoder = stdlibjson.NewEncoder(outfile)
+			o.out = outfile
 		} else {
-			o.closeFn = logfile.Close
-			o.encoder = stdlibjson.NewEncoder(logfile)
+			o.closeFn = func() error {
+				_ = w.Flush()
+				return logfile.Close()
+			}
+			o.out = logfile
 		}
 	}
-
-	o.encoder.SetEscapeHTML(false)
 
 	pf, err := output.NewPeriodicFlusher(flushPeriod, o.flushMetrics)
 	if err != nil {
@@ -123,8 +131,8 @@ func (o *Output) Stop() error {
 }
 
 // SetThresholds receives the thresholds before the output is Start()-ed.
-func (o *Output) SetThresholds(thresholds map[string]stats.Thresholds) {
-	ths := make(map[string][]*stats.Threshold)
+func (o *Output) SetThresholds(thresholds map[string]metrics.Thresholds) {
+	ths := make(map[string][]*metrics.Threshold)
 	for name, t := range thresholds {
 		ths[name] = append(ths[name], t.Thresholds...)
 	}
@@ -135,33 +143,34 @@ func (o *Output) flushMetrics() {
 	samples := o.GetBufferedSamples()
 	start := time.Now()
 	var count int
+	jw := new(jwriter.Writer)
 	for _, sc := range samples {
 		samples := sc.GetSamples()
 		count += len(samples)
 		for _, sample := range samples {
 			sample := sample
 			sample.Metric.Thresholds.Thresholds = o.thresholds[sample.Metric.Name]
-			o.handleMetric(sample.Metric)
-			err := o.encoder.Encode(WrapSample(sample))
-			if err != nil {
-				// Skip metric if it can't be made into JSON or envelope is null.
-				o.logger.WithError(err).Error("Sample couldn't be marshalled to JSON")
-			}
+			o.handleMetric(sample.Metric, jw)
+			wrapSample(sample).MarshalEasyJSON(jw)
+			jw.RawByte('\n')
 		}
+	}
+
+	if _, err := jw.DumpTo(o.out); err != nil {
+		// Skip metric if it can't be made into JSON or envelope is null.
+		o.logger.WithError(err).Error("Sample couldn't be marshalled to JSON")
 	}
 	if count > 0 {
 		o.logger.WithField("t", time.Since(start)).WithField("count", count).Debug("Wrote metrics to JSON")
 	}
 }
 
-func (o *Output) handleMetric(m *stats.Metric) {
+func (o *Output) handleMetric(m *metrics.Metric, jw *jwriter.Writer) {
 	if _, ok := o.seenMetrics[m.Name]; ok {
 		return
 	}
 	o.seenMetrics[m.Name] = struct{}{}
 
-	err := o.encoder.Encode(wrapMetric(m))
-	if err != nil {
-		o.logger.WithError(err).Error("Metric couldn't be marshalled to JSON")
-	}
+	wrapMetric(m).MarshalEasyJSON(jw)
+	jw.RawByte('\n')
 }

@@ -36,10 +36,11 @@ import (
 
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/compiler"
+	"go.k6.io/k6/js/eventloop"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/consts"
-	"go.k6.io/k6/lib/metrics"
 	"go.k6.io/k6/loader"
+	"go.k6.io/k6/metrics"
 )
 
 // A Bundle is a self-contained bundle of scripts and resources.
@@ -266,7 +267,7 @@ func (b *Bundle) Instantiate(
 	rt := vuImpl.runtime
 	bi = &BundleInstance{
 		Runtime: rt,
-		Context: vuImpl.ctxPtr,
+		Context: &vuImpl.ctx,
 		exports: make(map[string]goja.Callable),
 		env:     b.RuntimeOptions.Env,
 	}
@@ -298,7 +299,7 @@ func (b *Bundle) Instantiate(
 
 // Instantiates the bundle into an existing runtime. Not public because it also messes with a bunch
 // of other things, will potentially thrash data and makes a mess in it if the operation fails.
-func (b *Bundle) instantiate(logger logrus.FieldLogger, rt *goja.Runtime, init *InitContext, vuID uint64) error {
+func (b *Bundle) instantiate(logger logrus.FieldLogger, rt *goja.Runtime, init *InitContext, vuID uint64) (err error) {
 	rt.SetFieldNameMapper(common.FieldNameMapper{})
 	rt.SetRandSource(common.NewRandSource())
 
@@ -329,17 +330,16 @@ func (b *Bundle) instantiate(logger logrus.FieldLogger, rt *goja.Runtime, init *
 		Registry:    b.registry,
 	}
 	init.moduleVUImpl.initEnv = initenv
-	ctx := common.WithInitEnv(context.Background(), initenv)
-	*init.moduleVUImpl.ctxPtr = common.WithRuntime(ctx, rt)
-	unbindInit := common.BindToGlobal(rt, map[string]interface{}{
-		"require": init.Require,
-		"open":    init.Open,
+	init.moduleVUImpl.ctx = context.Background()
+	unbindInit := b.setInitGlobals(rt, init)
+	init.moduleVUImpl.eventLoop = eventloop.New(init.moduleVUImpl)
+	err = common.RunWithPanicCatching(logger, rt, func() error {
+		return init.moduleVUImpl.eventLoop.Start(func() error {
+			_, errRun := rt.RunProgram(b.Program)
+			return errRun
+		})
 	})
-	init.moduleVUImpl.eventLoop = newEventLoop(init.moduleVUImpl)
-	err := init.moduleVUImpl.eventLoop.start(func() error {
-		_, err := rt.RunProgram(b.Program)
-		return err
-	})
+
 	if err != nil {
 		var exception *goja.Exception
 		if errors.As(err, &exception) {
@@ -348,7 +348,7 @@ func (b *Bundle) instantiate(logger logrus.FieldLogger, rt *goja.Runtime, init *
 		return err
 	}
 	unbindInit()
-	*init.moduleVUImpl.ctxPtr = nil
+	init.moduleVUImpl.ctx = nil
 	init.moduleVUImpl.initEnv = nil
 
 	// If we've already initialized the original VU init context, forbid
@@ -360,6 +360,20 @@ func (b *Bundle) instantiate(logger logrus.FieldLogger, rt *goja.Runtime, init *
 	rt.SetRandSource(common.NewRandSource())
 
 	return nil
+}
+
+func (b *Bundle) setInitGlobals(rt *goja.Runtime, init *InitContext) (unset func()) {
+	mustSet := func(k string, v interface{}) {
+		if err := rt.Set(k, v); err != nil {
+			panic(fmt.Errorf("failed to set '%s' global object: %w", k, err))
+		}
+	}
+	mustSet("require", init.Require)
+	mustSet("open", init.Open)
+	return func() {
+		mustSet("require", goja.Undefined())
+		mustSet("open", goja.Undefined())
+	}
 }
 
 func generateSourceMapLoader(logger logrus.FieldLogger, filesystems map[string]afero.Fs,

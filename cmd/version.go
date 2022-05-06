@@ -28,15 +28,14 @@ import (
 	"go.k6.io/k6/lib/consts"
 )
 
-func getVersionCmd() *cobra.Command {
+func getCmdVersion(globalState *globalState) *cobra.Command {
 	// versionCmd represents the version command.
-	versionCmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   "version",
 		Short: "Show application version",
 		Long:  `Show the application version and exit.`,
 		Run: func(_ *cobra.Command, _ []string) {
-			fmt.Println("k6 v" + consts.FullVersion()) //nolint:forbidigo // we probably shouldn't do that though
+			printToStdout(globalState, fmt.Sprintf("k6 v%s\n", consts.FullVersion()))
 		},
 	}
-	return versionCmd
 }

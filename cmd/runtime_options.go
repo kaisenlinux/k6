@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
-	"strings"
 
 	"github.com/spf13/pflag"
 	"gopkg.in/guregu/null.v3"
@@ -38,22 +37,6 @@ import (
 
 var userEnvVarName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
-func parseEnvKeyValue(kv string) (string, string) {
-	if idx := strings.IndexRune(kv, '='); idx != -1 {
-		return kv[:idx], kv[idx+1:]
-	}
-	return kv, ""
-}
-
-func buildEnvMap(environ []string) map[string]string {
-	env := make(map[string]string, len(environ))
-	for _, kv := range environ {
-		k, v := parseEnvKeyValue(kv)
-		env[k] = v
-	}
-	return env
-}
-
 func runtimeOptionFlagSet(includeSysEnv bool) *pflag.FlagSet {
 	flags := pflag.NewFlagSet("", 0)
 	flags.SortFlags = false
@@ -64,6 +47,7 @@ base: pure goja - Golang JS VM supporting ES5.1+
 extended: base + Babel with parts of ES2015 preset
 		  slower to compile in case the script uses syntax unsupported by base
 `)
+	flags.StringP("type", "t", "", "override test type, \"js\" or \"archive\"")
 	flags.StringArrayP("env", "e", nil, "add/override environment variable with `VAR=value`")
 	flags.Bool("no-thresholds", false, "don't run thresholds")
 	flags.Bool("no-summary", false, "don't show the summary at the end of the test")
@@ -95,6 +79,7 @@ func getRuntimeOptions(flags *pflag.FlagSet, environment map[string]string) (lib
 	// TODO: refactor with composable helpers as a part of #883, to reduce copy-paste
 	// TODO: get these options out of the JSON config file as well?
 	opts := lib.RuntimeOptions{
+		TestType:             getNullString(flags, "type"),
 		IncludeSystemEnvVars: getNullBool(flags, "include-system-env-vars"),
 		CompatibilityMode:    getNullString(flags, "compatibility-mode"),
 		NoThresholds:         getNullBool(flags, "no-thresholds"),
@@ -103,11 +88,13 @@ func getRuntimeOptions(flags *pflag.FlagSet, environment map[string]string) (lib
 		Env:                  make(map[string]string),
 	}
 
-	if envVar, ok := environment["K6_COMPATIBILITY_MODE"]; ok {
+	if envVar, ok := environment["K6_TYPE"]; ok && !opts.TestType.Valid {
 		// Only override if not explicitly set via the CLI flag
-		if !opts.CompatibilityMode.Valid {
-			opts.CompatibilityMode = null.StringFrom(envVar)
-		}
+		opts.TestType = null.StringFrom(envVar)
+	}
+	if envVar, ok := environment["K6_COMPATIBILITY_MODE"]; ok && !opts.CompatibilityMode.Valid {
+		// Only override if not explicitly set via the CLI flag
+		opts.CompatibilityMode = null.StringFrom(envVar)
 	}
 	if _, err := lib.ValidateCompatibilityMode(opts.CompatibilityMode.String); err != nil {
 		// some early validation
@@ -127,6 +114,12 @@ func getRuntimeOptions(flags *pflag.FlagSet, environment map[string]string) (lib
 	if envVar, ok := environment["K6_SUMMARY_EXPORT"]; ok {
 		if !opts.SummaryExport.Valid {
 			opts.SummaryExport = null.StringFrom(envVar)
+		}
+	}
+
+	if envVar, ok := environment["SSLKEYLOGFILE"]; ok {
+		if !opts.KeyWriter.Valid {
+			opts.KeyWriter = null.StringFrom(envVar)
 		}
 	}
 
