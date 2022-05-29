@@ -123,7 +123,7 @@ func (me *MetricsEngine) initSubMetricsAndThresholds() error {
 		// even if they don't have any metric samples during the test run
 		me.markObserved(metric)
 		if metric.Sub != nil {
-			me.markObserved(metric.Sub.Metric)
+			me.markObserved(metric.Sub.Parent)
 		}
 	}
 
@@ -142,14 +142,16 @@ func (me *MetricsEngine) initSubMetricsAndThresholds() error {
 // EvaluateThresholds processes all of the thresholds.
 //
 // TODO: refactor, make private, optimize
-func (me *MetricsEngine) EvaluateThresholds() (thresholdsTainted, shouldAbort bool) {
+func (me *MetricsEngine) EvaluateThresholds(ignoreEmptySinks bool) (thresholdsTainted, shouldAbort bool) {
 	me.MetricsLock.Lock()
 	defer me.MetricsLock.Unlock()
 
 	t := me.executionState.GetCurrentTestRunDuration()
 
 	for _, m := range me.metricsWithThresholds {
-		if len(m.Thresholds.Thresholds) == 0 {
+		// If either the metric has no thresholds defined, or its sinks
+		// are empty, let's ignore its thresholds execution at this point.
+		if len(m.Thresholds.Thresholds) == 0 || (ignoreEmptySinks && m.Sink.IsEmpty()) {
 			continue
 		}
 		m.Tainted = null.BoolFrom(false)
