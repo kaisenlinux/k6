@@ -14,6 +14,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.k6.io/k6/errext"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modulestest"
 	"go.k6.io/k6/lib"
@@ -141,7 +142,7 @@ func TestVUTags(t *testing.T) {
 			assert.Equal(t, "vu101", val.String())
 		})
 
-		t.Run("DiscardWrongTypeRaisingError", func(t *testing.T) {
+		t.Run("DiscardWrongTypeAndRaisingError", func(t *testing.T) {
 			t.Parallel()
 
 			tenv := setupTagsExecEnv(t)
@@ -149,13 +150,17 @@ func TestVUTags(t *testing.T) {
 			state.Options.Throw = null.BoolFrom(true)
 			require.NotNil(t, state)
 
-			// array
-			_, err := tenv.Runtime.RunString(`exec.vu.tags["custom-tag"] = [1, 3, 5]`)
-			require.Contains(t, err.Error(), "only String, Boolean and Number")
+			cases := []string{
+				`[1, 3, 5]`,             // array
+				`{f1: "value1", f2: 4}`, // object
+			}
 
-			// object
-			_, err = tenv.Runtime.RunString(`exec.vu.tags["custom-tag"] = {f1: "value1", f2: 4}`)
-			require.Contains(t, err.Error(), "only String, Boolean and Number")
+			for _, val := range cases {
+				_, err := tenv.Runtime.RunString(`exec.vu.tags["custom-tag"] = ` + val)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "TypeError:")
+				assert.Contains(t, err.Error(), "only String, Boolean and Number")
+			}
 		})
 
 		t.Run("DiscardWrongTypeOnlyWarning", func(t *testing.T) {
@@ -168,6 +173,21 @@ func TestVUTags(t *testing.T) {
 			entries := tenv.LogHook.Drain()
 			require.Len(t, entries, 1)
 			assert.Contains(t, entries[0].Message, "discarded")
+		})
+
+		t.Run("DiscardNullOrUndefined", func(t *testing.T) {
+			t.Parallel()
+
+			cases := []string{"null", "undefined"}
+			tenv := setupTagsExecEnv(t)
+			for _, val := range cases {
+				_, err := tenv.Runtime.RunString(`exec.vu.tags["custom-tag"] = ` + val)
+				require.NoError(t, err)
+
+				entries := tenv.LogHook.Drain()
+				require.Len(t, entries, 1)
+				assert.Contains(t, entries[0].Message, "discarded")
+			}
 		})
 	})
 }
@@ -197,16 +217,16 @@ func TestAbortTest(t *testing.T) { //nolint:tparallel
 		require.NotNil(t, err)
 		var x *goja.InterruptedError
 		assert.ErrorAs(t, err, &x)
-		v, ok := x.Value().(*common.InterruptError)
+		v, ok := x.Value().(*errext.InterruptError)
 		require.True(t, ok)
 		require.Equal(t, v.Reason, reason)
 	}
 
 	t.Run("default reason", func(t *testing.T) { //nolint: paralleltest
-		prove(t, "exec.test.abort()", common.AbortTest)
+		prove(t, "exec.test.abort()", errext.AbortTest)
 	})
 	t.Run("custom reason", func(t *testing.T) { //nolint: paralleltest
-		prove(t, `exec.test.abort("mayday")`, fmt.Sprintf("%s: mayday", common.AbortTest))
+		prove(t, `exec.test.abort("mayday")`, fmt.Sprintf("%s: mayday", errext.AbortTest))
 	})
 }
 
@@ -397,4 +417,33 @@ func TestOptionsTestSetPropertyDenied(t *testing.T) {
 	paused, err := rt.RunString(`exec.test.options.paused`)
 	require.NoError(t, err)
 	assert.Equal(t, true, rt.ToValue(paused).ToBoolean())
+}
+
+func TestScenarioNoAvailableInInitContext(t *testing.T) {
+	t.Parallel()
+
+	rt := goja.New()
+	m, ok := New().NewModuleInstance(
+		&modulestest.VU{
+			RuntimeField: rt,
+			InitEnvField: &common.InitEnvironment{},
+			CtxField:     context.Background(),
+			StateField: &lib.State{
+				Options: lib.Options{
+					Paused: null.BoolFrom(true),
+				},
+			},
+		},
+	).(*ModuleInstance)
+	require.True(t, ok)
+	require.NoError(t, rt.Set("exec", m.Exports().Default))
+
+	scenarioExportedProps := []string{"name", "executor", "startTime", "progress", "iterationInInstance", "iterationInTest"}
+
+	for _, code := range scenarioExportedProps {
+		prop := fmt.Sprintf("exec.scenario.%s", code)
+		_, err := rt.RunString(prop)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "getting scenario information outside of the VU context is not supported")
+	}
 }

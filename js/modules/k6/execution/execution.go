@@ -29,6 +29,7 @@ import (
 
 	"github.com/dop251/goja"
 
+	"go.k6.io/k6/errext"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/lib"
@@ -89,18 +90,20 @@ func (mi *ModuleInstance) Exports() modules.Exports {
 	return modules.Exports{Default: mi.obj}
 }
 
+var errRunInInitContext = errors.New("getting scenario information outside of the VU context is not supported")
+
 // newScenarioInfo returns a goja.Object with property accessors to retrieve
 // information about the scenario the current VU is running in.
 func (mi *ModuleInstance) newScenarioInfo() (*goja.Object, error) {
 	rt := mi.vu.Runtime()
 	vuState := mi.vu.State()
 	if vuState == nil {
-		return nil, errors.New("getting scenario information in the init context is not supported")
+		return nil, errRunInInitContext
 	}
 	getScenarioState := func() *lib.ScenarioState {
 		ss := lib.GetScenarioState(mi.vu.Context())
 		if ss == nil {
-			common.Throw(rt, errors.New("getting scenario information in the init context is not supported"))
+			common.Throw(rt, errRunInInitContext)
 		}
 		return ss
 	}
@@ -125,9 +128,17 @@ func (mi *ModuleInstance) newScenarioInfo() (*goja.Object, error) {
 			return p
 		},
 		"iterationInInstance": func() interface{} {
+			if vuState.GetScenarioLocalVUIter == nil {
+				common.Throw(rt, errRunInInitContext)
+			}
+
 			return vuState.GetScenarioLocalVUIter()
 		},
 		"iterationInTest": func() interface{} {
+			if vuState.GetScenarioGlobalVUIter == nil {
+				common.Throw(rt, errRunInInitContext)
+			}
+
 			return vuState.GetScenarioGlobalVUIter()
 		},
 	}
@@ -176,11 +187,11 @@ func (mi *ModuleInstance) newTestInfo() (*goja.Object, error) {
 		// stop the test run
 		"abort": func() interface{} {
 			return func(msg goja.Value) {
-				reason := common.AbortTest
+				reason := errext.AbortTest
 				if msg != nil && !goja.IsUndefined(msg) {
 					reason = fmt.Sprintf("%s: %s", reason, msg.String())
 				}
-				rt.Interrupt(&common.InterruptError{Reason: reason})
+				rt.Interrupt(&errext.InterruptError{Reason: reason})
 			}
 		},
 		"options": func() interface{} {
@@ -324,7 +335,11 @@ func (o *tagsDynamicObject) Get(key string) goja.Value {
 // In any other case, if the Throw option is set then an error is raised
 // otherwise just a Warning is written.
 func (o *tagsDynamicObject) Set(key string, val goja.Value) bool {
-	switch val.ExportType().Kind() { //nolint:exhaustive
+	kind := reflect.Invalid
+	if typ := val.ExportType(); typ != nil {
+		kind = typ.Kind()
+	}
+	switch kind {
 	case
 		reflect.String,
 		reflect.Bool,
@@ -334,12 +349,11 @@ func (o *tagsDynamicObject) Set(key string, val goja.Value) bool {
 		o.State.Tags.Set(key, val.String())
 		return true
 	default:
-		err := fmt.Errorf("only String, Boolean and Number types are accepted as a Tag value")
+		reason := "only String, Boolean and Number types are accepted as a Tag value"
 		if o.State.Options.Throw.Bool {
-			common.Throw(o.Runtime, err)
-			return false
+			panic(o.Runtime.NewTypeError(reason))
 		}
-		o.State.Logger.Warnf("the execution.vu.tags.Set('%s') operation has been discarded because %s", key, err.Error())
+		o.State.Logger.Warnf("the execution.vu.tags.Set('%s') operation has been discarded because %s", key, reason)
 		return false
 	}
 }

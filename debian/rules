@@ -1,21 +1,28 @@
 #!/usr/bin/make -f
 
+include /usr/share/dpkg/default.mk
 export GOPATH=$(CURDIR)/obj-x86_64-linux-gnu
 
 %:
 	dh $@ --buildsystem=golang
 
+override_dh_auto_clean:
+	rm -rf $(CURDIR)/dist/*
+	rm -rf $(CURDIR)/obj-x86_64-linux-gnu
+
 override_dh_auto_build:
-	make build
-	mkdir -p $(CURDIR)/obj-x86_64-linux-gnu/bash/ $(CURDIR)/obj-x86_64-linux-gnu/zsh
-	$(CURDIR)/k6 completion bash > $(CURDIR)/obj-x86_64-linux-gnu/bash/k6
-	$(CURDIR)/k6 completion zsh > $(CURDIR)/obj-x86_64-linux-gnu/zsh/_k6
+	$(CURDIR)/build-release.sh
+	tar fx $(CURDIR)/dist/k6-$(DEB_VERSION_UPSTREAM)-linux-$(DEB_HOST_ARCH).tar.gz -C $(CURDIR)/dist/
+	mkdir -p $(CURDIR)/dist/bash/ $(CURDIR)/dist/zsh
+	$(CURDIR)/dist/k6-$(DEB_VERSION_UPSTREAM)-linux-$(DEB_HOST_ARCH)/k6 completion bash > $(CURDIR)/dist/bash/k6
+	$(CURDIR)/dist/k6-$(DEB_VERSION_UPSTREAM)-linux-$(DEB_HOST_ARCH)/k6 completion zsh > $(CURDIR)/dist/zsh/_k6
 
 override_dh_auto_test:
 	go test
 
 override_dh_auto_install:
 	dh_auto_install -- --no-source
-	mkdir -p $(CURDIR)/debian/k6/usr/share/bash-completion/completions/ $(CURDIR)/debian/k6/usr/share/zsh/vendor-completions/
-	cp $(CURDIR)/obj-x86_64-linux-gnu/bash/k6 $(CURDIR)/debian/k6/usr/share/bash-completion/completions/
-	cp $(CURDIR)/obj-x86_64-linux-gnu/zsh/_k6 $(CURDIR)/debian/k6/usr/share/zsh/vendor-completions/
+	mkdir -p $(CURDIR)/debian/k6/usr/share/bash-completion/completions/ $(CURDIR)/debian/k6/usr/share/zsh/vendor-completions/ $(CURDIR)/debian/k6/usr/bin
+	cp $(CURDIR)/dist/k6-$(DEB_VERSION_UPSTREAM)-linux-$(DEB_HOST_ARCH)/k6 $(CURDIR)/debian/k6/usr/bin
+	cp $(CURDIR)/dist/bash/k6 $(CURDIR)/debian/k6/usr/share/bash-completion/completions/
+	cp $(CURDIR)/dist/zsh/_k6 $(CURDIR)/debian/k6/usr/share/zsh/vendor-completions/

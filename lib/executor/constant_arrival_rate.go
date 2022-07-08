@@ -230,7 +230,12 @@ func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics
 	activeVUsWg := &sync.WaitGroup{}
 
 	returnedVUs := make(chan struct{})
+	waitOnProgressChannel := make(chan struct{})
 	startTime, maxDurationCtx, regDurationCtx, cancel := getDurationContexts(parentCtx, duration, gracefulStop)
+	defer func() {
+		cancel()
+		<-waitOnProgressChannel
+	}()
 
 	vusPool := newActiveVUPool()
 	defer func() {
@@ -246,7 +251,7 @@ func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics
 
 	vusFmt := pb.GetFixedLengthIntFormat(maxVUs)
 	progIters := fmt.Sprintf(
-		pb.GetFixedLengthFloatFormat(arrivalRatePerSec, 0)+" iters/s", arrivalRatePerSec)
+		pb.GetFixedLengthFloatFormat(arrivalRatePerSec, 2)+" iters/s", arrivalRatePerSec)
 	progressFn := func() (float64, []string) {
 		spent := time.Since(startTime)
 		currActiveVUs := atomic.LoadUint64(&activeVUsCount)
@@ -266,14 +271,17 @@ func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics
 		return math.Min(1, float64(spent)/float64(duration)), right
 	}
 	car.progress.Modify(pb.WithProgress(progressFn))
-	go trackProgress(parentCtx, maxDurationCtx, regDurationCtx, &car, progressFn)
-
 	maxDurationCtx = lib.WithScenarioState(maxDurationCtx, &lib.ScenarioState{
 		Name:       car.config.Name,
 		Executor:   car.config.Type,
 		StartTime:  startTime,
 		ProgressFn: progressFn,
 	})
+
+	go func() {
+		trackProgress(parentCtx, maxDurationCtx, regDurationCtx, &car, progressFn)
+		close(waitOnProgressChannel)
+	}()
 
 	returnVU := func(u lib.InitializedVU) {
 		car.executionState.ReturnVU(u, true)

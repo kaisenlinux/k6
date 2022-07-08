@@ -29,7 +29,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"go.k6.io/k6/errext"
-	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/metrics/engine"
@@ -152,8 +151,11 @@ func (e *Engine) Init(globalCtx, runCtx context.Context) (run func() error, wait
 
 		// Make the background jobs process the currently buffered metrics and
 		// run the thresholds, then wait for that to be done.
-		processMetricsAfterRun <- struct{}{}
-		<-processMetricsAfterRun
+		select {
+		case processMetricsAfterRun <- struct{}{}:
+			<-processMetricsAfterRun
+		case <-globalCtx.Done():
+		}
 
 		return err
 	}
@@ -196,7 +198,7 @@ func (e *Engine) startBackgroundProcesses(
 				switch {
 				case errors.As(err, &serr):
 					e.OutputManager.SetRunStatus(lib.RunStatusAbortedScriptError)
-				case common.IsInterruptError(err):
+				case errext.IsInterruptError(err):
 					e.OutputManager.SetRunStatus(lib.RunStatusAbortedUser)
 				default:
 					e.OutputManager.SetRunStatus(lib.RunStatusAbortedSystem)
