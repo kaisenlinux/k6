@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package js
 
 import (
@@ -51,12 +31,17 @@ import (
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/fsext"
 	"go.k6.io/k6/loader"
+
+	"github.com/grafana/xk6-redis/redis"
+	"github.com/grafana/xk6-timers/timers"
+	expws "github.com/grafana/xk6-websockets/websockets"
 )
 
 type programWithSource struct {
-	pgm    *goja.Program
-	src    string
-	module *goja.Object
+	pgm     *goja.Program
+	src     string
+	module  *goja.Object
+	exports *goja.Object
 }
 
 const openCantBeUsedOutsideInitContextMsg = `The "open()" function is only available in the init stage ` +
@@ -88,7 +73,7 @@ type InitContext struct {
 // NewInitContext creates a new initcontext with the provided arguments
 func NewInitContext(
 	logger logrus.FieldLogger, rt *goja.Runtime, c *compiler.Compiler, compatMode lib.CompatibilityMode,
-	ctxPtr *context.Context, filesystems map[string]afero.Fs, pwd *url.URL,
+	filesystems map[string]afero.Fs, pwd *url.URL,
 ) *InitContext {
 	return &InitContext{
 		compiler:          c,
@@ -99,7 +84,7 @@ func NewInitContext(
 		logger:            logger,
 		modules:           getJSModules(),
 		moduleVUImpl: &moduleVUImpl{
-			ctx:     *ctxPtr,
+			ctx:     context.Background(),
 			runtime: rt,
 		},
 	}
@@ -157,12 +142,6 @@ type moduleVUImpl struct {
 	state     *lib.State
 	runtime   *goja.Runtime
 	eventLoop *eventloop.EventLoop
-}
-
-func newModuleVUImpl() *moduleVUImpl {
-	return &moduleVUImpl{
-		ctx: context.Background(),
-	}
 }
 
 func (m *moduleVUImpl) Context() context.Context {
@@ -375,17 +354,20 @@ func (i *InitContext) allowOnlyOpenedFiles() {
 
 func getInternalJSModules() map[string]interface{} {
 	return map[string]interface{}{
-		"k6":             k6.New(),
-		"k6/crypto":      crypto.New(),
-		"k6/crypto/x509": x509.New(),
-		"k6/data":        data.New(),
-		"k6/encoding":    encoding.New(),
-		"k6/execution":   execution.New(),
-		"k6/net/grpc":    grpc.New(),
-		"k6/html":        html.New(),
-		"k6/http":        http.New(),
-		"k6/metrics":     metrics.New(),
-		"k6/ws":          ws.New(),
+		"k6":                         k6.New(),
+		"k6/crypto":                  crypto.New(),
+		"k6/crypto/x509":             x509.New(),
+		"k6/data":                    data.New(),
+		"k6/encoding":                encoding.New(),
+		"k6/execution":               execution.New(),
+		"k6/experimental/redis":      redis.New(),
+		"k6/experimental/websockets": &expws.RootModule{},
+		"k6/experimental/timers":     timers.New(),
+		"k6/net/grpc":                grpc.New(),
+		"k6/html":                    html.New(),
+		"k6/http":                    http.New(),
+		"k6/metrics":                 metrics.New(),
+		"k6/ws":                      ws.New(),
 	}
 }
 

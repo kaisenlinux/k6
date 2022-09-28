@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package http
 
 import (
@@ -107,7 +87,7 @@ func (c *Client) responseFromHTTPext(resp *httpext.Response) *Response {
 }
 
 // TODO: break this function up
-//nolint: gocyclo, cyclop, funlen, gocognit
+//nolint:gocyclo, cyclop, funlen, gocognit
 func (c *Client) parseRequest(
 	method string, reqURL, body interface{}, params goja.Value,
 ) (*httpext.ParsedHTTPRequest, error) {
@@ -136,7 +116,6 @@ func (c *Client) parseRequest(
 		Throw:            state.Options.Throw.Bool,
 		Redirects:        state.Options.MaxRedirects,
 		Cookies:          make(map[string]*httpext.HTTPRequestCookie),
-		Tags:             make(map[string]string),
 		ResponseCallback: c.responseCallback,
 	}
 
@@ -336,8 +315,10 @@ func (c *Client) parseRequest(
 				if tagObj == nil {
 					continue
 				}
-				for _, key := range tagObj.Keys() {
-					result.Tags[key] = tagObj.Get(key).String()
+				tagKeys := tagObj.Keys()
+				result.Tags = make([][2]string, 0, len(tagKeys))
+				for _, key := range tagKeys {
+					result.Tags = append(result.Tags, [2]string{key, tagObj.Get(key).String()})
 				}
 			case "auth":
 				result.Auth = params.Get(k).String()
@@ -437,22 +418,24 @@ func (c *Client) prepareBatchObject(requests map[string]interface{}) (
 
 // Batch makes multiple simultaneous HTTP requests. The provideds reqsV should be an array of request
 // objects. Batch returns an array of responses and/or error
-func (c *Client) Batch(reqsV goja.Value) (interface{}, error) {
+func (c *Client) Batch(reqsV ...goja.Value) (interface{}, error) {
 	state := c.moduleInstance.vu.State()
 	if state == nil {
 		return nil, ErrBatchForbiddenInInitContext
 	}
 
+	if len(reqsV) == 0 {
+		return nil, fmt.Errorf("no argument was provided to http.batch()")
+	} else if len(reqsV) > 1 {
+		return nil, fmt.Errorf("http.batch() accepts only an array or an object of requests")
+	}
 	var (
 		err       error
 		batchReqs []httpext.BatchParsedHTTPRequest
 		results   interface{} // either []*Response or map[string]*Response
 	)
 
-	if reqsV == nil {
-		return nil, errors.New("no argument was provided to http.batch()")
-	}
-	switch v := reqsV.Export().(type) {
+	switch v := reqsV[0].Export().(type) {
 	case []interface{}:
 		batchReqs, results, err = c.prepareBatchArray(v)
 	case map[string]interface{}:

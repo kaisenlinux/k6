@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package executor
 
 import (
@@ -93,11 +73,14 @@ func (bs *BaseExecutor) GetProgress() *pb.ProgressBar {
 // getMetricTags returns a tag set that can be used to emit metrics by the
 // executor. The VU ID is optional.
 func (bs *BaseExecutor) getMetricTags(vuID *uint64) *metrics.SampleTags {
-	tags := bs.executionState.Options.RunTags.CloneTags()
-	if bs.executionState.Options.SystemTags.Has(metrics.TagScenario) {
+	tags := make(map[string]string, len(bs.executionState.Test.Options.RunTags))
+	for k, v := range bs.executionState.Test.Options.RunTags {
+		tags[k] = v
+	}
+	if bs.executionState.Test.Options.SystemTags.Has(metrics.TagScenario) {
 		tags["scenario"] = bs.config.GetName()
 	}
-	if vuID != nil && bs.executionState.Options.SystemTags.Has(metrics.TagVU) {
+	if vuID != nil && bs.executionState.Test.Options.SystemTags.Has(metrics.TagVU) {
 		tags["vu"] = strconv.FormatUint(*vuID, 10)
 	}
 	return metrics.IntoSampleTags(&tags)

@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2017 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package ws
 
 import (
@@ -122,7 +102,7 @@ func (mi *WS) Exports() modules.Exports {
 
 // Connect establishes a WebSocket connection based on the parameters provided.
 // TODO: refactor to reduce the method complexity
-//nolint: funlen,gocognit,gocyclo,cyclop
+//nolint:funlen,gocognit,gocyclo
 func (mi *WS) Connect(url string, args ...goja.Value) (*WSHTTPResponse, error) {
 	ctx := mi.vu.Context()
 	rt := mi.vu.Runtime()
@@ -286,8 +266,13 @@ func (mi *WS) Connect(url string, args ...goja.Value) (*WSHTTPResponse, error) {
 	if connErr != nil {
 		// Pass the error to the user script before exiting immediately
 		socket.handleEvent("error", rt.ToValue(connErr))
-
-		return nil, connErr
+		if state.Options.Throw.Bool {
+			return nil, connErr
+		}
+		state.Logger.WithError(connErr).Warn("Attempt to establish a WebSocket connection failed")
+		return &WSHTTPResponse{
+			Error: connErr.Error(),
+		}, nil
 	}
 
 	// Run the user-provided set up function
@@ -594,7 +579,7 @@ func (s *Socket) closeConnection(code int) error {
 }
 
 // Wraps conn.ReadMessage in a channel
-func (s *Socket) readPump(readChan chan *message, errorChan chan error, closeChan chan int) { //nolint: cyclop
+func (s *Socket) readPump(readChan chan *message, errorChan chan error, closeChan chan int) {
 	for {
 		messageType, data, err := s.conn.ReadMessage()
 		if err != nil {

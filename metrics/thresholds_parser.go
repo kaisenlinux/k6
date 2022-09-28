@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2021 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package metrics
 
 import (
@@ -144,7 +124,7 @@ const (
 // the smallest common substring, the actual slice order matters.
 // Longer tokens with symbols in common with shorter ones must appear
 // first in the list in order to be effectively matched.
-var operatorTokens = [7]string{ // nolint:gochecknoglobals
+var operatorTokens = [7]string{ //nolint:gochecknoglobals
 	tokenLessEqual,
 	tokenLess,
 	tokenGreaterEqual,
@@ -190,7 +170,7 @@ const (
 // It is meant to be used during the parsing of threshold expressions.
 // Although declared as a `var`, being an array, it is effectively
 // immutable and can be considered constant.
-var aggregationMethodTokens = [8]string{ // nolint:gochecknoglobals
+var aggregationMethodTokens = [8]string{ //nolint:gochecknoglobals
 	tokenValue,
 	tokenCount,
 	tokenRate,

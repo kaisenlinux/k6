@@ -28,7 +28,6 @@ import (
 	"google.golang.org/grpc/test/grpc_testing"
 	"gopkg.in/guregu/null.v3"
 
-	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modulestest"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/fsext"
@@ -61,36 +60,16 @@ func TestClient(t *testing.T) {
 	t.Parallel()
 
 	type testState struct {
-		rt      *goja.Runtime
-		vuState *lib.State
-		env     *common.InitEnvironment
+		*modulestest.Runtime
 		httpBin *httpmultibin.HTTPMultiBin
 		samples chan metrics.SampleContainer
 	}
 	setup := func(t *testing.T) testState {
 		t.Helper()
 
-		root, err := lib.NewGroup("", nil)
-		require.NoError(t, err)
 		tb := httpmultibin.NewHTTPMultiBin(t)
 		samples := make(chan metrics.SampleContainer, 1000)
-		state := &lib.State{
-			Group:     root,
-			Dialer:    tb.Dialer,
-			TLSConfig: tb.TLSClientConfig,
-			Samples:   samples,
-			Options: lib.Options{
-				SystemTags: metrics.NewSystemTagSet(
-					metrics.TagName,
-					metrics.TagURL,
-				),
-				UserAgent: null.StringFrom("k6-test"),
-			},
-			BuiltinMetrics: metrics.RegisterBuiltinMetrics(
-				metrics.NewRegistry(),
-			),
-			Tags: lib.NewTagMap(nil),
-		}
+		testRuntime := modulestest.NewRuntime(t)
 
 		cwd, err := os.Getwd()
 		require.NoError(t, err)
@@ -98,22 +77,12 @@ func TestClient(t *testing.T) {
 		if isWindows {
 			fs = fsext.NewTrimFilePathSeparatorFs(fs)
 		}
-		initEnv := &common.InitEnvironment{
-			Logger: logrus.New(),
-			CWD:    &url.URL{Path: cwd},
-			FileSystems: map[string]afero.Fs{
-				"file": fs,
-			},
-		}
-
-		rt := goja.New()
-		rt.SetFieldNameMapper(common.FieldNameMapper{})
+		testRuntime.VU.InitEnvField.CWD = &url.URL{Path: cwd}
+		testRuntime.VU.InitEnvField.FileSystems = map[string]afero.Fs{"file": fs}
 
 		return testState{
-			rt:      rt,
+			Runtime: testRuntime,
 			httpBin: tb,
-			vuState: state,
-			env:     initEnv,
 			samples: samples,
 		}
 	}
@@ -716,17 +685,9 @@ func TestClient(t *testing.T) {
 
 			ts := setup(t)
 
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			mvu := &modulestest.VU{
-				RuntimeField: ts.rt,
-				InitEnvField: ts.env,
-				CtxField:     ctx,
-			}
-
-			m, ok := New().NewModuleInstance(mvu).(*ModuleInstance)
+			m, ok := New().NewModuleInstance(ts.VU).(*ModuleInstance)
 			require.True(t, ok)
-			require.NoError(t, ts.rt.Set("grpc", m.Exports().Named))
+			require.NoError(t, ts.VU.Runtime().Set("grpc", m.Exports().Named))
 
 			// setup necessary environment if needed by a test
 			if tt.setup != nil {
@@ -734,13 +695,32 @@ func TestClient(t *testing.T) {
 			}
 
 			replace := func(code string) (goja.Value, error) {
-				return ts.rt.RunString(ts.httpBin.Replacer.Replace(code))
+				return ts.VU.Runtime().RunString(ts.httpBin.Replacer.Replace(code))
 			}
 
 			val, err := replace(tt.initString.code)
 			assertResponse(t, tt.initString, err, val, ts)
 
-			mvu.StateField = ts.vuState
+			root, err := lib.NewGroup("", nil)
+			require.NoError(t, err)
+			state := &lib.State{
+				Group:     root,
+				Dialer:    ts.httpBin.Dialer,
+				TLSConfig: ts.httpBin.TLSClientConfig,
+				Samples:   ts.samples,
+				Options: lib.Options{
+					SystemTags: metrics.NewSystemTagSet(
+						metrics.TagName,
+						metrics.TagURL,
+					),
+					UserAgent: null.StringFrom("k6-test"),
+				},
+				BuiltinMetrics: metrics.RegisterBuiltinMetrics(
+					metrics.NewRegistry(),
+				),
+				Tags: lib.NewTagMap(nil),
+			}
+			ts.MoveToVUContext(state)
 			val, err = replace(tt.vuString.code)
 			assertResponse(t, tt.vuString, err, val, ts)
 		})

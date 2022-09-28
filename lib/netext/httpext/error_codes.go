@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package httpext
 
 import (
@@ -112,7 +92,7 @@ func http2ErrCodeOffset(code http2.ErrCode) errCode {
 	return 1 + errCode(code)
 }
 
-//nolint: errorlint,cyclop
+//nolint:errorlint
 func errorCodeForNetOpError(err *net.OpError) (errCode, string) {
 	// TODO: refactor this further - a big switch would be more readable, maybe
 	// we should even check for *os.SyscallError in the main switch body in the
@@ -172,7 +152,7 @@ func errorCodeForNetOpError(err *net.OpError) (errCode, string) {
 }
 
 // errorCodeForError returns the errorCode and a specific error message for given error.
-//nolint: errorlint, cyclop
+//nolint:errorlint
 func errorCodeForError(err error) (errCode, string) {
 	// We explicitly check for `Unwrap()` in the default switch branch, but
 	// checking for the concrete error types first gives us the opportunity to

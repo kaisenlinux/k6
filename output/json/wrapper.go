@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package json
 
 import (
@@ -32,8 +12,8 @@ import (
 type sampleEnvelope struct {
 	Type string `json:"type"`
 	Data struct {
-		Time  time.Time         `json:"time"`
-		Value float64           `json:"value"`
+		Time  time.Time           `json:"time"`
+		Value float64             `json:"value"`
 		Tags  *metrics.SampleTags `json:"tags"`
 	} `json:"data"`
 	Metric string `json:"metric"`
@@ -54,15 +34,13 @@ func wrapSample(sample metrics.Sample) sampleEnvelope {
 
 //easyjson:json
 type metricEnvelope struct {
-	Type   string        `json:"type"`
-	Data   *metrics.Metric `json:"data"`
-	Metric string        `json:"metric"`
-}
-
-func wrapMetric(metric *metrics.Metric) metricEnvelope {
-	return metricEnvelope{
-		Type:   "Metric",
-		Metric: metric.Name,
-		Data:   metric,
-	}
+	Type string `json:"type"`
+	Data struct {
+		Name       string               `json:"name"`
+		Type       metrics.MetricType   `json:"type"`
+		Contains   metrics.ValueType    `json:"contains"`
+		Thresholds metrics.Thresholds   `json:"thresholds"`
+		Submetrics []*metrics.Submetric `json:"submetrics"`
+	} `json:"data"`
+	Metric string `json:"metric"`
 }

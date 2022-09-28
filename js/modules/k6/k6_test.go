@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package k6
 
 import (
@@ -171,7 +151,6 @@ func TestGroup(t *testing.T) {
 		m, ok := New().NewModuleInstance(
 			&modulestest.VU{
 				RuntimeField: rt,
-				InitEnvField: &common.InitEnvironment{},
 				CtxField:     context.Background(),
 				StateField:   state,
 			},
@@ -211,6 +190,11 @@ func TestGroup(t *testing.T) {
 func checkTestRuntime(t testing.TB) (*goja.Runtime, chan metrics.SampleContainer, *metrics.BuiltinMetrics) {
 	rt := goja.New()
 
+	test := modulestest.NewRuntime(t)
+	m, ok := New().NewModuleInstance(test.VU).(*K6)
+	require.True(t, ok)
+	require.NoError(t, rt.Set("k6", m.Exports().Named))
+
 	root, err := lib.NewGroup("", nil)
 	assert.NoError(t, err)
 	samples := make(chan metrics.SampleContainer, 1000)
@@ -223,19 +207,9 @@ func checkTestRuntime(t testing.TB) (*goja.Runtime, chan metrics.SampleContainer
 		Tags: lib.NewTagMap(map[string]string{
 			"group": root.Path,
 		}),
+		BuiltinMetrics: metrics.RegisterBuiltinMetrics(metrics.NewRegistry()),
 	}
-
-	state.BuiltinMetrics = metrics.RegisterBuiltinMetrics(metrics.NewRegistry())
-	m, ok := New().NewModuleInstance(
-		&modulestest.VU{
-			RuntimeField: rt,
-			InitEnvField: &common.InitEnvironment{},
-			CtxField:     context.Background(),
-			StateField:   state,
-		},
-	).(*K6)
-	require.True(t, ok)
-	require.NoError(t, rt.Set("k6", m.Exports().Named))
+	test.MoveToVUContext(state)
 
 	return rt, samples, state.BuiltinMetrics
 }
@@ -447,7 +421,6 @@ func TestCheckContextExpiry(t *testing.T) {
 	m, ok := New().NewModuleInstance(
 		&modulestest.VU{
 			RuntimeField: rt,
-			InitEnvField: &common.InitEnvironment{},
 			CtxField:     ctx,
 			StateField:   state,
 		},

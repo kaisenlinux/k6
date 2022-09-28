@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package httpext
 
 import (
@@ -118,7 +98,6 @@ func TestMakeRequestError(t *testing.T) {
 			Compressions: []CompressionType{badCompressionType},
 		}
 		state := &lib.State{
-			Options:   lib.Options{RunTags: &metrics.SampleTags{}},
 			Transport: http.DefaultTransport,
 			Logger:    logrus.New(),
 			Tags:      lib.NewTagMap(nil),
@@ -141,7 +120,6 @@ func TestMakeRequestError(t *testing.T) {
 		logger := logrus.New()
 		logger.Level = logrus.DebugLevel
 		state := &lib.State{
-			Options:   lib.Options{RunTags: &metrics.SampleTags{}},
 			Transport: srv.Client().Transport,
 			Logger:    logger,
 			Tags:      lib.NewTagMap(nil),
@@ -192,7 +170,6 @@ func TestResponseStatus(t *testing.T) {
 				samples := make(chan<- metrics.SampleContainer, 1)
 				registry := metrics.NewRegistry()
 				state := &lib.State{
-					Options:        lib.Options{RunTags: &metrics.SampleTags{}},
 					Transport:      server.Client().Transport,
 					Logger:         logger,
 					Samples:        samples,
@@ -271,7 +248,6 @@ func TestMakeRequestTimeoutInTheMiddle(t *testing.T) {
 	registry := metrics.NewRegistry()
 	state := &lib.State{
 		Options: lib.Options{
-			RunTags:    &metrics.SampleTags{},
 			SystemTags: &metrics.DefaultSystemTagSet,
 		},
 		Transport:      srv.Client().Transport,
@@ -348,7 +324,6 @@ func TestTrailFailed(t *testing.T) {
 			registry := metrics.NewRegistry()
 			state := &lib.State{
 				Options: lib.Options{
-					RunTags:    &metrics.SampleTags{},
 					SystemTags: &metrics.DefaultSystemTagSet,
 				},
 				Transport:      srv.Client().Transport,
@@ -410,7 +385,6 @@ func TestMakeRequestDialTimeout(t *testing.T) {
 	registry := metrics.NewRegistry()
 	state := &lib.State{
 		Options: lib.Options{
-			RunTags:    &metrics.SampleTags{},
 			SystemTags: &metrics.DefaultSystemTagSet,
 		},
 		Transport: &http.Transport{
@@ -469,7 +443,6 @@ func TestMakeRequestTimeoutInTheBegining(t *testing.T) {
 	registry := metrics.NewRegistry()
 	state := &lib.State{
 		Options: lib.Options{
-			RunTags:    &metrics.SampleTags{},
 			SystemTags: &metrics.DefaultSystemTagSet,
 		},
 		Transport:      srv.Client().Transport,

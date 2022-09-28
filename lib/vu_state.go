@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package lib
 
 import (
@@ -42,11 +22,17 @@ type DialContexter interface {
 
 // State provides the volatile state for a VU.
 type State struct {
-	// Global options.
-	Options Options
+	// Global options and built-in metrics.
+	//
+	// TODO: remove them from here, the built-in metrics and the script options
+	// are not part of a VU's unique "state", they are global and the same for
+	// all VUs. Figure out how to thread them some other way, e.g. through the
+	// TestPreInitState. The Samples channel might also benefit from that...
+	Options        Options
+	BuiltinMetrics *metrics.BuiltinMetrics
 
 	// Logger. Avoid using the global logger.
-	// TODO change to logrus.FieldLogger when there is time to fix all the tests
+	// TODO: change to logrus.FieldLogger when there is time to fix all the tests
 	Logger *logrus.Logger
 
 	// Current group; all emitted metrics are tagged with this.
@@ -85,8 +71,6 @@ type State struct {
 	// unique globally across k6 instances (taking into account execution
 	// segments).
 	GetScenarioGlobalVUIter func() uint64
-
-	BuiltinMetrics *metrics.BuiltinMetrics
 }
 
 // CloneTags makes a copy of the tags map and returns it.

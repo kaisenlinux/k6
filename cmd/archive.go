@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package cmd
 
 import (
@@ -43,13 +23,13 @@ func (c *cmdArchive) run(cmd *cobra.Command, args []string) error {
 	// an execution shortcut option (e.g. `iterations` or `duration`),
 	// we will have multiple conflicting execution options since the
 	// derivation will set `scenarios` as well.
-	err = test.initRunner.SetOptions(test.consolidatedConfig.Options)
+	testRunState, err := test.buildTestRunState(test.consolidatedConfig.Options)
 	if err != nil {
 		return err
 	}
 
 	// Archive.
-	arc := test.initRunner.MakeArchive()
+	arc := testRunState.Runner.MakeArchive()
 	f, err := c.gs.fs.Create(c.archiveOut)
 	if err != nil {
 		return err

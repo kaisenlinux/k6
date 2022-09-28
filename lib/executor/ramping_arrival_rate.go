@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package executor
 
 import (
@@ -188,7 +168,7 @@ func (varr *RampingArrivalRate) Init(ctx context.Context) error {
 	varr.et = et
 	varr.iterSegIndex = lib.NewSegmentedIndex(et)
 
-	return err //nolint: wrapcheck
+	return err //nolint:wrapcheck
 }
 
 // cal calculates the  transtitions between stages and gives the next full value produced by the
@@ -457,7 +437,7 @@ func (varr RampingArrivalRate) Run(parentCtx context.Context, out chan<- metrics
 	shownWarning := false
 	metricTags := varr.getMetricTags(nil)
 	go varr.config.cal(varr.et, ch)
-	droppedIterationMetric := varr.executionState.BuiltinMetrics.DroppedIterations
+	droppedIterationMetric := varr.executionState.Test.BuiltinMetrics.DroppedIterations
 	for nextTime := range ch {
 		select {
 		case <-regDurationDone:

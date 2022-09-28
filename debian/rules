@@ -26,3 +26,5 @@ override_dh_auto_install:
 	cp $(CURDIR)/dist/k6-$(DEB_VERSION_UPSTREAM)-linux-$(DEB_HOST_ARCH)/k6 $(CURDIR)/debian/k6/usr/bin
 	cp $(CURDIR)/dist/bash/k6 $(CURDIR)/debian/k6/usr/share/bash-completion/completions/
 	cp $(CURDIR)/dist/zsh/_k6 $(CURDIR)/debian/k6/usr/share/zsh/vendor-completions/
+
+override_dh_dwz:

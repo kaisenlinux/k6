@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package lib
 
 import (
@@ -41,7 +21,7 @@ import (
 const DefaultScenarioName = "default"
 
 // DefaultSummaryTrendStats are the default trend columns shown in the test summary output
-// nolint: gochecknoglobals
+//nolint:gochecknoglobals
 var DefaultSummaryTrendStats = []string{"avg", "min", "med", "max", "p(90)", "p(95)"}
 
 // Describes a TLS version. Serialised to/from JSON as a string, eg. "tls1.2".
@@ -192,7 +172,7 @@ func decryptPrivateKey(privKey, password string) ([]byte, error) {
 	   being used here because it is deprecated due to it not supporting *good* crypography
 	   ultimately though we want to support something so we will be using it for now.
 	*/
-	decryptedKey, err := x509.DecryptPEMBlock(block, []byte(password)) // nolint: staticcheck
+	decryptedKey, err := x509.DecryptPEMBlock(block, []byte(password)) //nolint:staticcheck
 	if err != nil {
 		return nil, err
 	}
@@ -411,8 +391,8 @@ type Options struct {
 	// Use pointer for identifying whether user provide any tag or not.
 	SystemTags *metrics.SystemTagSet `json:"systemTags" envconfig:"K6_SYSTEM_TAGS"`
 
-	// Tags to be applied to all samples for this running
-	RunTags *metrics.SampleTags `json:"tags" envconfig:"K6_TAGS"`
+	// Tags are key-value pairs to be applied to all samples for the run.
+	RunTags map[string]string `json:"tags" envconfig:"K6_TAGS"`
 
 	// Buffer size of the channel for metric samples; 0 means unbuffered
 	MetricSamplesBufferSize null.Int `json:"metricSamplesBufferSize" envconfig:"K6_METRIC_SAMPLES_BUFFER_SIZE"`
@@ -567,7 +547,7 @@ func (o Options) Apply(opts Options) Options {
 	if opts.SystemTags != nil {
 		o.SystemTags = opts.SystemTags
 	}
-	if !opts.RunTags.IsEmpty() {
+	if len(opts.RunTags) > 0 {
 		o.RunTags = opts.RunTags
 	}
 	if opts.MetricSamplesBufferSize.Valid {

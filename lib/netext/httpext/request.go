@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package httpext
 
 import (
@@ -71,7 +51,7 @@ type ParsedHTTPRequest struct {
 	Redirects        null.Int
 	ActiveJar        *cookiejar.Jar
 	Cookies          map[string]*HTTPRequestCookie
-	Tags             map[string]string
+	Tags             [][2]string
 }
 
 // Matches non-compliant io.Closer implementations (e.g. zstd.Decoder)
@@ -130,7 +110,7 @@ func updateK6Response(k6Response *Response, finishedReq *finishedRequest) {
 // MakeRequest makes http request for tor the provided ParsedHTTPRequest.
 //
 // TODO: split apart...
-// nolint: cyclop, gocyclo, funlen, gocognit
+//nolint:cyclop, gocyclo, funlen, gocognit
 func MakeRequest(ctx context.Context, state *lib.State, preq *ParsedHTTPRequest) (*Response, error) {
 	respReq := &Request{
 		Method:  preq.Req.Method,
@@ -189,8 +169,8 @@ func MakeRequest(ctx context.Context, state *lib.State, preq *ParsedHTTPRequest)
 
 	tags := state.CloneTags()
 	// Override any global tags with request-specific ones.
-	for k, v := range preq.Tags {
-		tags[k] = v
+	for _, tag := range preq.Tags {
+		tags[tag[0]] = tag[1]
 	}
 
 	// Only set the name system tag if the user didn't explicitly set it beforehand,

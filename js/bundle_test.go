@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package js
 
 import (
@@ -50,31 +30,46 @@ import (
 
 const isWindows = runtime.GOOS == "windows"
 
+func getTestPreInitState(tb testing.TB, logger *logrus.Logger, rtOpts *lib.RuntimeOptions) *lib.TestPreInitState {
+	if logger == nil {
+		logger = testutils.NewLogger(tb)
+	}
+	if rtOpts == nil {
+		rtOpts = &lib.RuntimeOptions{}
+	}
+	reg := metrics.NewRegistry()
+	return &lib.TestPreInitState{
+		Logger:         logger,
+		RuntimeOptions: *rtOpts,
+		Registry:       reg,
+		BuiltinMetrics: metrics.RegisterBuiltinMetrics(reg),
+	}
+}
+
 func getSimpleBundle(tb testing.TB, filename, data string, opts ...interface{}) (*Bundle, error) {
-	var (
-		fs                        = afero.NewMemMapFs()
-		rtOpts                    = lib.RuntimeOptions{}
-		logger logrus.FieldLogger = testutils.NewLogger(tb)
-	)
+	fs := afero.NewMemMapFs()
+	var rtOpts *lib.RuntimeOptions
+	var logger *logrus.Logger
 	for _, o := range opts {
 		switch opt := o.(type) {
 		case afero.Fs:
 			fs = opt
 		case lib.RuntimeOptions:
-			rtOpts = opt
-		case logrus.FieldLogger:
+			rtOpts = &opt
+		case *logrus.Logger:
 			logger = opt
+		default:
+			tb.Fatalf("unknown test option %q", opt)
 		}
 	}
+
 	return NewBundle(
-		logger,
+		getTestPreInitState(tb, logger, rtOpts),
 		&loader.SourceData{
 			URL:  &url.URL{Path: filename, Scheme: "file"},
 			Data: []byte(data),
 		},
 		map[string]afero.Fs{"file": fs, "https": afero.NewMemMapFs()},
-		rtOpts,
-		metrics.NewRegistry(),
 	)
 }
 
@@ -96,11 +91,11 @@ func TestNewBundle(t *testing.T) {
 		_, err := getSimpleBundle(t, "/script.js", `throw new Error("aaaa");`)
 		exception := new(scriptException)
 		require.ErrorAs(t, err, &exception)
-		require.EqualError(t, err, "Error: aaaa\n\tat file:///script.js:1:7(2)\n")
+		require.EqualError(t, err, "Error: aaaa\n\tat file:///script.js:2:7(3)\n\tat native\n")
 	})
 	t.Run("InvalidExports", func(t *testing.T) {
 		t.Parallel()
-		_, err := getSimpleBundle(t, "/script.js", `exports = null`)
+		_, err := getSimpleBundle(t, "/script.js", `module.exports = null`)
 		require.EqualError(t, err, "exports must be an object")
 	})
 	t.Run("DefaultUndefined", func(t *testing.T) {
@@ -169,13 +164,13 @@ func TestNewBundle(t *testing.T) {
 				// ES2015 modules are not supported
 				{
 					"Modules", "base", `export default function() {};`,
-					"file:///script.js: Line 1:1 Unexpected reserved word",
+					"file:///script.js: Line 2:1 Unexpected reserved word (and 2 more errors)",
 				},
 				// BigInt is not supported
 				{
 					"BigInt", "base",
 					`module.exports.default = function() {}; BigInt(1231412444)`,
-					"ReferenceError: BigInt is not defined\n\tat file:///script.js:1:47(6)\n",
+					"ReferenceError: BigInt is not defined\n\tat file:///script.js:2:47(7)\n\tat native\n",
 				},
 			}
 
@@ -481,7 +476,7 @@ func TestNewBundleFromArchive(t *testing.T) {
 	logger := testutils.NewLogger(t)
 	checkBundle := func(t *testing.T, b *Bundle) {
 		require.Equal(t, lib.Options{VUs: null.IntFrom(12345)}, b.Options)
-		bi, err := b.Instantiate(logger, 0, newModuleVUImpl())
+		bi, err := b.Instantiate(logger, 0)
 		require.NoError(t, err)
 		val, err := bi.exports[consts.DefaultFn](goja.Undefined())
 		require.NoError(t, err)
@@ -489,7 +484,7 @@ func TestNewBundleFromArchive(t *testing.T) {
 	}
 
 	checkArchive := func(t *testing.T, arc *lib.Archive, rtOpts lib.RuntimeOptions, expError string) {
-		b, err := NewBundleFromArchive(logger, arc, rtOpts, metrics.NewRegistry())
+		b, err := NewBundleFromArchive(getTestPreInitState(t, logger, &rtOpts), arc)
 		if expError != "" {
 			require.Error(t, err)
 			require.Contains(t, err.Error(), expError)
@@ -572,9 +567,9 @@ func TestNewBundleFromArchive(t *testing.T) {
 			PwdURL:      &url.URL{Scheme: "file", Path: "/"},
 			Filesystems: nil,
 		}
-		b, err := NewBundleFromArchive(logger, arc, lib.RuntimeOptions{}, metrics.NewRegistry())
+		b, err := NewBundleFromArchive(getTestPreInitState(t, logger, nil), arc)
 		require.NoError(t, err)
-		bi, err := b.Instantiate(logger, 0, newModuleVUImpl())
+		bi, err := b.Instantiate(logger, 0)
 		require.NoError(t, err)
 		val, err := bi.exports[consts.DefaultFn](goja.Undefined())
 		require.NoError(t, err)
@@ -711,14 +706,14 @@ func TestOpen(t *testing.T) {
 					}
 					require.NoError(t, err)
 
-					arcBundle, err := NewBundleFromArchive(logger, sourceBundle.makeArchive(), lib.RuntimeOptions{}, metrics.NewRegistry())
+					arcBundle, err := NewBundleFromArchive(getTestPreInitState(t, logger, nil), sourceBundle.makeArchive())
 
 					require.NoError(t, err)
 
 					for source, b := range map[string]*Bundle{"source": sourceBundle, "archive": arcBundle} {
 						b := b
 						t.Run(source, func(t *testing.T) {
-							bi, err := b.Instantiate(logger, 0, newModuleVUImpl())
+							bi, err := b.Instantiate(logger, 0)
 							require.NoError(t, err)
 							v, err := bi.exports[consts.DefaultFn](goja.Undefined())
 							require.NoError(t, err)
@@ -754,32 +749,11 @@ func TestBundleInstantiate(t *testing.T) {
 		require.NoError(t, err)
 		logger := testutils.NewLogger(t)
 
-		bi, err := b.Instantiate(logger, 0, newModuleVUImpl())
+		bi, err := b.Instantiate(logger, 0)
 		require.NoError(t, err)
 		v, err := bi.exports[consts.DefaultFn](goja.Undefined())
 		require.NoError(t, err)
 		require.Equal(t, true, v.Export())
-	})
-
-	t.Run("SetAndRun", func(t *testing.T) {
-		t.Parallel()
-		b, err := getSimpleBundle(t, "/script.js", `
-		export let options = {
-			vus: 5,
-			teardownTimeout: '1s',
-		};
-		let val = true;
-		export default function() { return val; }
-	`)
-		require.NoError(t, err)
-		logger := testutils.NewLogger(t)
-
-		bi, err := b.Instantiate(logger, 0, newModuleVUImpl())
-		require.NoError(t, err)
-		bi.Runtime.Set("val", false)
-		v, err := bi.exports[consts.DefaultFn](goja.Undefined())
-		require.NoError(t, err)
-		require.Equal(t, false, v.Export())
 	})
 
 	t.Run("Options", func(t *testing.T) {
@@ -795,10 +769,10 @@ func TestBundleInstantiate(t *testing.T) {
 		require.NoError(t, err)
 		logger := testutils.NewLogger(t)
 
-		bi, err := b.Instantiate(logger, 0, newModuleVUImpl())
+		bi, err := b.Instantiate(logger, 0)
 		require.NoError(t, err)
 		// Ensure `options` properties are correctly marshalled
-		jsOptions := bi.Runtime.Get("options").ToObject(bi.Runtime)
+		jsOptions := bi.pgm.exports.Get("options").ToObject(bi.Runtime)
 		vus := jsOptions.Get("vus").Export()
 		require.Equal(t, int64(5), vus)
 		tdt := jsOptions.Get("teardownTimeout").Export()
@@ -807,9 +781,9 @@ func TestBundleInstantiate(t *testing.T) {
 		// Ensure options propagate correctly from outside to the script
 		optOrig := b.Options.VUs
 		b.Options.VUs = null.IntFrom(10)
-		bi2, err := b.Instantiate(logger, 0, newModuleVUImpl())
+		bi2, err := b.Instantiate(logger, 0)
 		require.NoError(t, err)
-		jsOptions = bi2.Runtime.Get("options").ToObject(bi2.Runtime)
+		jsOptions = bi2.pgm.exports.Get("options").ToObject(bi2.Runtime)
 		vus = jsOptions.Get("vus").Export()
 		require.Equal(t, int64(10), vus)
 		b.Options.VUs = optOrig
@@ -832,7 +806,7 @@ func TestBundleEnv(t *testing.T) {
 	require.NoError(t, err)
 
 	logger := testutils.NewLogger(t)
-	b2, err := NewBundleFromArchive(logger, b1.makeArchive(), lib.RuntimeOptions{}, metrics.NewRegistry())
+	b2, err := NewBundleFromArchive(getTestPreInitState(t, logger, nil), b1.makeArchive())
 	require.NoError(t, err)
 
 	bundles := map[string]*Bundle{"Source": b1, "Archive": b2}
@@ -843,7 +817,7 @@ func TestBundleEnv(t *testing.T) {
 			require.Equal(t, "1", b.RuntimeOptions.Env["TEST_A"])
 			require.Equal(t, "", b.RuntimeOptions.Env["TEST_B"])
 
-			bi, err := b.Instantiate(logger, 0, newModuleVUImpl())
+			bi, err := b.Instantiate(logger, 0)
 			require.NoError(t, err)
 			_, err = bi.exports[consts.DefaultFn](goja.Undefined())
 			require.NoError(t, err)
@@ -869,7 +843,7 @@ func TestBundleNotSharable(t *testing.T) {
 	require.NoError(t, err)
 	logger := testutils.NewLogger(t)
 
-	b2, err := NewBundleFromArchive(logger, b1.makeArchive(), lib.RuntimeOptions{}, metrics.NewRegistry())
+	b2, err := NewBundleFromArchive(getTestPreInitState(t, logger, nil), b1.makeArchive())
 	require.NoError(t, err)
 
 	bundles := map[string]*Bundle{"Source": b1, "Archive": b2}
@@ -879,7 +853,7 @@ func TestBundleNotSharable(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			for i := 0; i < vus; i++ {
-				bi, err := b.Instantiate(logger, uint64(i), newModuleVUImpl())
+				bi, err := b.Instantiate(logger, uint64(i))
 				require.NoError(t, err)
 				for j := 0; j < iters; j++ {
 					bi.Runtime.Set("__ITER", j)

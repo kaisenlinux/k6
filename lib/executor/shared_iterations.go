@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2019 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package executor
 
 import (
@@ -182,7 +162,7 @@ func (si *SharedIterations) Init(ctx context.Context) error {
 
 // Run executes a specific total number of iterations, which are all shared by
 // the configured VUs.
-// nolint:funlen
+//nolint:funlen
 func (si SharedIterations) Run(parentCtx context.Context, out chan<- metrics.SampleContainer) (err error) {
 	numVUs := si.config.GetVUs(si.executionState.ExecutionTuple)
 	iterations := si.et.ScaleInt64(si.config.Iterations.Int64)
@@ -238,7 +218,7 @@ func (si SharedIterations) Run(parentCtx context.Context, out chan<- metrics.Sam
 		if attemptedIters < totalIters {
 			metrics.PushIfNotDone(parentCtx, out, metrics.Sample{
 				Value:  float64(totalIters - attemptedIters),
-				Metric: si.executionState.BuiltinMetrics.DroppedIterations,
+				Metric: si.executionState.Test.BuiltinMetrics.DroppedIterations,
 				Tags:   si.getMetricTags(nil), Time: time.Now(),
 			})
 		}

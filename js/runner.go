@@ -1,23 +1,3 @@
-/*
- *
- * k6 - a next-generation load testing tool
- * Copyright (C) 2016 Load Impact
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package js
 
 import (
@@ -38,7 +18,6 @@ import (
 
 	"github.com/dop251/goja"
 	"github.com/oxtoacart/bpool"
-	"github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
 	"golang.org/x/net/http2"
 	"golang.org/x/time/rate"
@@ -61,15 +40,13 @@ var _ lib.Runner = &Runner{}
 // TODO: https://github.com/grafana/k6/issues/2186
 // An advanced TLS support should cover the rid of the warning
 //
-// nolint:gochecknoglobals
+//nolint:gochecknoglobals
 var nameToCertWarning sync.Once
 
 type Runner struct {
-	Bundle         *Bundle
-	Logger         *logrus.Logger
-	defaultGroup   *lib.Group
-	builtinMetrics *metrics.BuiltinMetrics
-	registry       *metrics.Registry
+	Bundle       *Bundle
+	preInitState *lib.TestPreInitState
+	defaultGroup *lib.Group
 
 	BaseDialer net.Dialer
 	Resolver   netext.Resolver
@@ -79,34 +56,30 @@ type Runner struct {
 
 	console   *console
 	setupData []byte
-
-	keylogger io.Writer
 }
 
-// New returns a new Runner for the provide source
-func New(
-	rs *lib.RuntimeState, src *loader.SourceData, filesystems map[string]afero.Fs,
-) (*Runner, error) {
-	bundle, err := NewBundle(rs.Logger, src, filesystems, rs.RuntimeOptions, rs.Registry)
+// New returns a new Runner for the provided source
+func New(piState *lib.TestPreInitState, src *loader.SourceData, filesystems map[string]afero.Fs) (*Runner, error) {
+	bundle, err := NewBundle(piState, src, filesystems)
 	if err != nil {
 		return nil, err
 	}
 
-	return NewFromBundle(rs, bundle)
+	return NewFromBundle(piState, bundle)
 }
 
 // NewFromArchive returns a new Runner from the source in the provided archive
-func NewFromArchive(rs *lib.RuntimeState, arc *lib.Archive) (*Runner, error) {
-	bundle, err := NewBundleFromArchive(rs.Logger, arc, rs.RuntimeOptions, rs.Registry)
+func NewFromArchive(piState *lib.TestPreInitState, arc *lib.Archive) (*Runner, error) {
+	bundle, err := NewBundleFromArchive(piState, arc)
 	if err != nil {
 		return nil, err
 	}
 
-	return NewFromBundle(rs, bundle)
+	return NewFromBundle(piState, bundle)
 }
 
 // NewFromBundle returns a new Runner from the provided Bundle
-func NewFromBundle(rs *lib.RuntimeState, b *Bundle) (*Runner, error) {
+func NewFromBundle(piState *lib.TestPreInitState, b *Bundle) (*Runner, error) {
 	defaultGroup, err := lib.NewGroup("", nil)
 	if err != nil {
 		return nil, err
@@ -115,20 +88,17 @@ func NewFromBundle(rs *lib.RuntimeState, b *Bundle) (*Runner, error) {
 	defDNS := types.DefaultDNSConfig()
 	r := &Runner{
 		Bundle:       b,
-		Logger:       rs.Logger,
+		preInitState: piState,
 		defaultGroup: defaultGroup,
 		BaseDialer: net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 			DualStack: true,
 		},
-		console: newConsole(rs.Logger),
+		console: newConsole(piState.Logger),
 		Resolver: netext.NewResolver(
 			net.LookupIP, 0, defDNS.Select.DNSSelect, defDNS.Policy.DNSPolicy),
 		ActualResolver: net.LookupIP,
-		builtinMetrics: rs.BuiltinMetrics,
-		registry:       rs.Registry,
-		keylogger:      rs.KeyLogger,
 	}
 
 	err = r.SetOptions(r.Bundle.Options)
@@ -149,11 +119,10 @@ func (r *Runner) NewVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 	return lib.InitializedVU(vu), nil
 }
 
-// nolint:funlen
+//nolint:funlen
 func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.SampleContainer) (*VU, error) {
 	// Instantiate a new bundle, make a VU out of it.
-	moduleVUImpl := newModuleVUImpl()
-	bi, err := r.Bundle.Instantiate(r.Logger, idLocal, moduleVUImpl)
+	bi, err := r.Bundle.Instantiate(r.preInitState.Logger, idLocal)
 	if err != nil {
 		return nil, err
 	}
@@ -204,17 +173,19 @@ func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 		MaxVersion:         uint16(tlsVersions.Max),
 		Certificates:       certs,
 		Renegotiation:      tls.RenegotiateFreelyAsClient,
-		KeyLogWriter:       r.keylogger,
+		KeyLogWriter:       r.preInitState.KeyLogger,
 	}
 	// Follow NameToCertificate in https://pkg.go.dev/crypto/tls@go1.17.6#Config, leave this field nil
 	// when it is empty
 	if len(nameToCert) > 0 {
 		nameToCertWarning.Do(func() {
-			r.Logger.Warn("tlsAuth.domains option could be removed in the next releases, it's recommended to leave it empty " +
-				"and let k6 automatically detect from the provided certificate. It follows the Go's NameToCertificate " +
-				"deprecation - https://pkg.go.dev/crypto/tls@go1.17#Config.")
+			r.preInitState.Logger.Warn(
+				"tlsAuth.domains option could be removed in the next releases, it's recommended to leave it empty " +
+					"and let k6 automatically detect from the provided certificate. It follows the Go's NameToCertificate " +
+					"deprecation - https://pkg.go.dev/crypto/tls@go1.17#Config.",
+			)
 		})
-		// nolint:staticcheck // ignore SA1019 we can deprecate it but we have to continue to support the previous code.
+		//nolint:staticcheck // ignore SA1019 we can deprecate it but we have to continue to support the previous code.
 		tlsConfig.NameToCertificate = nameToCert
 	}
 	transport := &http.Transport{
@@ -252,11 +223,10 @@ func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 		BPool:          bpool.NewBufferPool(100),
 		Samples:        samplesOut,
 		scenarioIter:   make(map[string]uint64),
-		moduleVUImpl:   moduleVUImpl,
 	}
 
 	vu.state = &lib.State{
-		Logger:         vu.Runner.Logger,
+		Logger:         vu.Runner.preInitState.Logger,
 		Options:        vu.Runner.Bundle.Options,
 		Transport:      vu.Transport,
 		Dialer:         vu.Dialer,
@@ -267,9 +237,9 @@ func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 		VUID:           vu.ID,
 		VUIDGlobal:     vu.IDGlobal,
 		Samples:        vu.Samples,
-		Tags:           lib.NewTagMap(vu.Runner.Bundle.Options.RunTags.CloneTags()),
+		Tags:           lib.NewTagMap(copyStringMap(vu.Runner.Bundle.Options.RunTags)),
 		Group:          r.defaultGroup,
-		BuiltinMetrics: r.builtinMetrics,
+		BuiltinMetrics: r.preInitState.BuiltinMetrics,
 	}
 	vu.moduleVUImpl.state = vu.state
 	_ = vu.Runtime.Set("console", vu.Console)
@@ -384,13 +354,11 @@ func (r *Runner) HandleSummary(ctx context.Context, summary *lib.Summary) (map[s
 	}
 
 	handleSummaryFn := goja.Undefined()
-	if exported := vu.Runtime.Get("exports").ToObject(vu.Runtime); exported != nil {
-		fn := exported.Get(consts.HandleSummaryFn)
-		if _, ok := goja.AssertFunction(fn); ok {
-			handleSummaryFn = fn
-		} else if fn != nil {
-			return nil, fmt.Errorf("exported identifier %s must be a function", consts.HandleSummaryFn)
-		}
+	fn := vu.getExported(consts.HandleSummaryFn)
+	if _, ok := goja.AssertFunction(fn); ok {
+		handleSummaryFn = fn
+	} else if fn != nil {
+		return nil, fmt.Errorf("exported identifier %s must be a function", consts.HandleSummaryFn)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, r.getTimeoutFor(consts.HandleSummaryFn))
@@ -399,7 +367,7 @@ func (r *Runner) HandleSummary(ctx context.Context, summary *lib.Summary) (map[s
 		<-ctx.Done()
 		vu.Runtime.Interrupt(context.Canceled)
 	}()
-	*vu.Context = ctx
+	vu.moduleVUImpl.ctx = ctx
 
 	wrapper := strings.Replace(summaryWrapperLambdaCode, "/*JSLIB_SUMMARY_CODE*/", jslibSummaryCode, 1)
 	handleSummaryWrapperRaw, err := vu.Runtime.RunString(wrapper)
@@ -439,14 +407,14 @@ func (r *Runner) HandleSummary(ctx context.Context, summary *lib.Summary) (map[s
 func (r *Runner) SetOptions(opts lib.Options) error {
 	r.Bundle.Options = opts
 	r.RPSLimit = nil
-	if rps := opts.RPS; rps.Valid {
+	if rps := opts.RPS; rps.Valid && rps.Int64 > 0 {
 		r.RPSLimit = rate.NewLimiter(rate.Limit(rps.Int64), 1)
 	}
 
 	// TODO: validate that all exec values are either nil or valid exported methods (or HTTP requests in the future)
 
 	if opts.ConsoleOutput.Valid {
-		c, err := newFileConsole(opts.ConsoleOutput.String, r.Logger.Formatter)
+		c, err := newFileConsole(opts.ConsoleOutput.String, r.preInitState.Logger.Formatter)
 		if err != nil {
 			return err
 		}
@@ -524,11 +492,7 @@ func (r *Runner) runPart(
 	if err != nil {
 		return goja.Undefined(), err
 	}
-	exp := vu.Runtime.Get("exports").ToObject(vu.Runtime)
-	if exp == nil {
-		return goja.Undefined(), nil
-	}
-	fn, ok := goja.AssertFunction(exp.Get(name))
+	fn, ok := goja.AssertFunction(vu.getExported(name))
 	if !ok {
 		return goja.Undefined(), nil
 	}
@@ -539,7 +503,7 @@ func (r *Runner) runPart(
 		<-ctx.Done()
 		vu.Runtime.Interrupt(context.Canceled)
 	}()
-	*vu.Context = ctx
+	vu.moduleVUImpl.ctx = ctx
 
 	group, err := r.GetDefaultGroup().Group(name)
 	if err != nil {
@@ -602,8 +566,6 @@ type VU struct {
 	state *lib.State
 	// count of iterations executed by this VU in each scenario
 	scenarioIter map[string]uint64
-
-	moduleVUImpl *moduleVUImpl
 }
 
 // Verify that interfaces are implemented
@@ -648,7 +610,7 @@ func (u *VU) Activate(params *lib.VUActivationParams) lib.ActiveVU {
 
 	opts := u.Runner.Bundle.Options
 	// TODO: maybe we can cache the original tags only clone them and add (if any) new tags on top ?
-	u.state.Tags = lib.NewTagMap(opts.RunTags.CloneTags())
+	u.state.Tags = lib.NewTagMap(copyStringMap(opts.RunTags))
 	for k, v := range params.Tags {
 		u.state.Tags.Set(k, v)
 	}
@@ -666,7 +628,7 @@ func (u *VU) Activate(params *lib.VUActivationParams) lib.ActiveVU {
 	}
 
 	ctx := params.RunContext
-	*u.Context = ctx
+	u.moduleVUImpl.ctx = ctx
 
 	u.state.GetScenarioVUIter = func() uint64 {
 		return u.scenarioIter[params.Scenario]
@@ -773,6 +735,10 @@ func (u *ActiveVU) RunOnce() error {
 	return err
 }
 
+func (u *VU) getExported(name string) goja.Value {
+	return u.BundleInstance.pgm.module.Get("exports").ToObject(u.Runtime).Get(name)
+}
+
 // if isDefault is true, cancel also needs to be provided and it should cancel the provided context
 // TODO remove the need for the above through refactoring of this function and its callees
 func (u *VU) runFn(
@@ -825,7 +791,7 @@ func (u *VU) runFn(
 
 	sampleTags := metrics.NewSampleTags(u.state.CloneTags())
 	u.state.Samples <- u.Dialer.GetTrail(
-		startTime, endTime, isFullIteration, isDefault, sampleTags, u.Runner.builtinMetrics)
+		startTime, endTime, isFullIteration, isDefault, sampleTags, u.Runner.preInitState.BuiltinMetrics)
 
 	return v, isFullIteration, endTime.Sub(startTime), err
 }
@@ -874,4 +840,12 @@ func (s *scriptException) Hint() string {
 
 func (s *scriptException) ExitCode() exitcodes.ExitCode {
 	return exitcodes.ScriptException
+}
+
+func copyStringMap(m map[string]string) map[string]string {
+	clone := make(map[string]string, len(m))
+	for ktag, vtag := range m {
+		clone[ktag] = vtag
+	}
+	return clone
 }
