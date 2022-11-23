@@ -110,7 +110,8 @@ func TestTracer(t *testing.T) { //nolint:tparallel
 		}
 		prev = val
 	}
-	builtinMetrics := metrics.RegisterBuiltinMetrics(metrics.NewRegistry())
+	registry := metrics.NewRegistry()
+	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 
 	for tnum, isReuse := range []bool{false, true, true} { //nolint:paralleltest
 		t.Run(fmt.Sprintf("Test #%d", tnum), func(t *testing.T) {
@@ -129,7 +130,8 @@ func TestTracer(t *testing.T) { //nolint:tparallel
 				time.Sleep(traceDelay)
 			}
 			trail := tracer.Done()
-			trail.SaveSamples(builtinMetrics, metrics.IntoSampleTags(&map[string]string{"tag": "value"}))
+			ctm := &metrics.TagsAndMeta{Tags: registry.RootTagSet().With("tag", "value")}
+			trail.SaveSamples(builtinMetrics, ctm)
 			samples := trail.GetSamples()
 
 			assertLaterOrZero(t, tracer.getConn, isReuse)
@@ -151,7 +153,7 @@ func TestTracer(t *testing.T) { //nolint:tparallel
 				seenMetrics[s.Metric] = true
 
 				assert.False(t, s.Time.IsZero())
-				assert.Equal(t, map[string]string{"tag": "value"}, s.Tags.CloneTags())
+				assert.Equal(t, map[string]string{"tag": "value"}, s.Tags.Map())
 
 				switch s.Metric {
 				case builtinMetrics.HTTPReqs:
@@ -226,8 +228,9 @@ func TestTracerNegativeHttpSendingValues(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NoError(t, res.Body.Close())
 		trail := tracer.Done()
-		builtinMetrics := metrics.RegisterBuiltinMetrics(metrics.NewRegistry())
-		trail.SaveSamples(builtinMetrics, nil)
+		registry := metrics.NewRegistry()
+		builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
+		trail.SaveSamples(builtinMetrics, &metrics.TagsAndMeta{Tags: registry.RootTagSet()})
 
 		require.True(t, trail.Sending > 0)
 	}

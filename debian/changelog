@@ -1,3 +1,11 @@
+k6 (0.41.0-1kaisen) kaisen-packages; urgency=medium
+
+  * Import the 0.41.0 release
+  * Update the quilt patch
+  * Set GOPATH in _build
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Wed, 23 Nov 2022 16:24:17 +0100
+
 k6 (0.40.0-1kaisen) kaisen-packages; urgency=medium
 
   * Import the 0.40.0 release

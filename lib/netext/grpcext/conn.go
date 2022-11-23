@@ -30,7 +30,7 @@ import (
 // Request represents a gRPC request.
 type Request struct {
 	MethodDescriptor protoreflect.MethodDescriptor
-	Tags             map[string]string
+	TagsAndMeta      *metrics.TagsAndMeta
 	Message          []byte
 }
 
@@ -111,7 +111,7 @@ func (c *Conn) Invoke(
 		return nil, fmt.Errorf("unable to serialise request object to protocol buffer: %w", err)
 	}
 
-	ctx = withTags(ctx, req.Tags)
+	ctx = withRPCState(ctx, &rpcState{tagsAndMeta: req.TagsAndMeta})
 
 	resp := dynamicpb.NewMessage(req.MethodDescriptor.Output())
 	header, trailer := metadata.New(nil), metadata.New(nil)
@@ -196,39 +196,37 @@ func (statsHandler) TagRPC(ctx context.Context, _ *grpcstats.RPCTagInfo) context
 // HandleRPC implements the grpcstats.Handler interface
 func (h statsHandler) HandleRPC(ctx context.Context, stat grpcstats.RPCStats) {
 	state := h.vu.State()
-	tags := getTags(ctx)
+	stateRPC := getRPCState(ctx) //nolint:ifshort
 
-	// If the request is done by the reflection handler
-	// then the tags will be nil.
-	//
-	// In this case, we can reuse the State's Tags.
-	if tags == nil {
-		tags = state.CloneTags()
+	// If the request is done by the reflection handler then the tags will be
+	// nil. In this case, we can reuse the VU.State's Tags.
+	if stateRPC == nil {
+		// TODO: investigate this more, there has to be a way to fix it :/
+		ctm := state.Tags.GetCurrentValues()
+		stateRPC = &rpcState{tagsAndMeta: &ctm}
 	}
 
 	switch s := stat.(type) {
 	case *grpcstats.OutHeader:
+		// TODO: figure out something better, e.g. via TagConn() or TagRPC()?
 		if state.Options.SystemTags.Has(metrics.TagIP) && s.RemoteAddr != nil {
 			if ip, _, err := net.SplitHostPort(s.RemoteAddr.String()); err == nil {
-				tags["ip"] = ip
+				stateRPC.tagsAndMeta.SetSystemTagOrMeta(metrics.TagIP, ip)
 			}
 		}
 	case *grpcstats.End:
 		if state.Options.SystemTags.Has(metrics.TagStatus) {
-			tags["status"] = strconv.Itoa(int(status.Code(s.Error)))
+			stateRPC.tagsAndMeta.SetSystemTagOrMeta(metrics.TagStatus, strconv.Itoa(int(status.Code(s.Error))))
 		}
 
-		mTags := map[string]string(tags)
-		sampleTags := metrics.IntoSampleTags(&mTags)
-		metrics.PushIfNotDone(ctx, state.Samples, metrics.ConnectedSamples{
-			Samples: []metrics.Sample{
-				{
-					Metric: state.BuiltinMetrics.GRPCReqDuration,
-					Tags:   sampleTags,
-					Value:  metrics.D(s.EndTime.Sub(s.BeginTime)),
-					Time:   s.EndTime,
-				},
+		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
+			TimeSeries: metrics.TimeSeries{
+				Metric: state.BuiltinMetrics.GRPCReqDuration,
+				Tags:   stateRPC.tagsAndMeta.Tags,
 			},
+			Time:     s.EndTime,
+			Metadata: stateRPC.tagsAndMeta.Metadata,
+			Value:    metrics.D(s.EndTime.Sub(s.BeginTime)),
 		})
 	}
 
@@ -305,21 +303,22 @@ func formatPayload(payload interface{}) string {
 	return string(b)
 }
 
-type ctxKeyTags struct{}
+type contextKey string
 
-type reqtags map[string]string
+var ctxKeyRPCState = contextKey("rpcState") //nolint:gochecknoglobals
 
-func withTags(ctx context.Context, tags reqtags) context.Context {
-	if tags == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, ctxKeyTags{}, tags)
+type rpcState struct {
+	tagsAndMeta *metrics.TagsAndMeta
 }
 
-func getTags(ctx context.Context) reqtags {
-	v := ctx.Value(ctxKeyTags{})
+func withRPCState(ctx context.Context, rpcState *rpcState) context.Context {
+	return context.WithValue(ctx, ctxKeyRPCState, rpcState)
+}
+
+func getRPCState(ctx context.Context) *rpcState {
+	v := ctx.Value(ctxKeyRPCState)
 	if v == nil {
 		return nil
 	}
-	return v.(reqtags)
+	return v.(*rpcState) //nolint: forcetypeassert
 }

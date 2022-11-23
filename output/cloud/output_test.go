@@ -33,9 +33,17 @@ import (
 	"go.k6.io/k6/output"
 )
 
-func tagEqual(expected, got *metrics.SampleTags) bool {
-	expectedMap := expected.CloneTags()
-	gotMap := got.CloneTags()
+func tagEqual(expected, got json.RawMessage) bool {
+	var expectedMap, gotMap map[string]string
+	err := json.Unmarshal(expected, &expectedMap)
+	if err != nil {
+		panic("tagEqual: " + err.Error())
+	}
+
+	err = json.Unmarshal(got, &gotMap)
+	if err != nil {
+		panic("tagEqual: " + err.Error())
+	}
 
 	if len(expectedMap) != len(gotMap) {
 		return false
@@ -61,9 +69,7 @@ func getSampleChecker(t *testing.T, expSamples <-chan []Sample) http.HandlerFunc
 		assert.NoError(t, json.Unmarshal(body, &receivedSamples))
 
 		expSamples := <-expSamples
-		if !assert.Len(t, receivedSamples, len(expSamples)) {
-			return
-		}
+		require.Len(t, receivedSamples, len(expSamples))
 
 		for i, expSample := range expSamples {
 			receivedSample := receivedSamples[i]
@@ -75,15 +81,13 @@ func getSampleChecker(t *testing.T, expSamples <-chan []Sample) http.HandlerFunc
 				continue
 			}
 
-			if !assert.IsType(t, expSample.Data, receivedSample.Data) {
-				continue
-			}
+			require.IsType(t, expSample.Data, receivedSample.Data)
 
 			switch expData := expSample.Data.(type) {
 			case *SampleDataSingle:
 				receivedData, ok := receivedSample.Data.(*SampleDataSingle)
 				assert.True(t, ok)
-				assert.True(t, expData.Tags.IsEqual(receivedData.Tags))
+				assert.JSONEq(t, string(expData.Tags), string(receivedData.Tags))
 				assert.Equal(t, expData.Time, receivedData.Time)
 				assert.Equal(t, expData.Type, receivedData.Type)
 				assert.Equal(t, expData.Value, receivedData.Value)
@@ -97,7 +101,7 @@ func getSampleChecker(t *testing.T, expSamples <-chan []Sample) http.HandlerFunc
 			case *SampleDataAggregatedHTTPReqs:
 				receivedData, ok := receivedSample.Data.(*SampleDataAggregatedHTTPReqs)
 				assert.True(t, ok)
-				assert.True(t, expData.Tags.IsEqual(receivedData.Tags))
+				assert.JSONEq(t, string(expData.Tags), string(receivedData.Tags))
 				assert.Equal(t, expData.Time, receivedData.Time)
 				assert.Equal(t, expData.Type, receivedData.Type)
 				assert.Equal(t, expData.Values, receivedData.Values)
@@ -159,7 +163,8 @@ func runCloudOutputTestCase(t *testing.T, minSamples int) {
 		require.NoError(t, err)
 	}))
 
-	builtinMetrics := metrics.RegisterBuiltinMetrics(metrics.NewRegistry())
+	registry := metrics.NewRegistry()
+	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	out, err := newOutput(output.Params{
 		Logger:     testutils.NewLogger(t),
 		JSONConfig: json.RawMessage(fmt.Sprintf(`{"host": "%s", "noCompress": true}`, tb.ServerHTTP.URL)),
@@ -189,11 +194,8 @@ func runCloudOutputTestCase(t *testing.T, minSamples int) {
 	assert.Equal(t, types.Duration(5*time.Millisecond), out.config.AggregationWaitPeriod.Duration)
 
 	now := time.Now()
-	tagMap := map[string]string{"test": "mest", "a": "b", "name": "name", "url": "url"}
-	tags := metrics.IntoSampleTags(&tagMap)
-	expectedTagMap := tags.CloneTags()
-	expectedTagMap["url"], _ = tags.Get("name")
-	expectedTags := metrics.IntoSampleTags(&expectedTagMap)
+	tagMap := map[string]string{"test": "mest", "a": "b", "name": "name", "url": "name"}
+	tags := registry.RootTagSet().WithTagsFromMap(tagMap)
 
 	expSamples := make(chan []Sample)
 	defer close(expSamples)
@@ -203,18 +205,23 @@ func runCloudOutputTestCase(t *testing.T, minSamples int) {
 	})
 
 	out.AddMetricSamples([]metrics.SampleContainer{metrics.Sample{
-		Time:   now,
-		Metric: builtinMetrics.VUs,
-		Tags:   tags,
-		Value:  1.0,
+		TimeSeries: metrics.TimeSeries{
+			Metric: builtinMetrics.VUs,
+			Tags:   tags,
+		},
+		Time:  now,
+		Value: 1.0,
 	}})
+
+	enctags, err := json.Marshal(tags)
+	require.NoError(t, err)
 	expSamples <- []Sample{{
 		Type:   DataTypeSingle,
 		Metric: metrics.VUsName,
 		Data: &SampleDataSingle{
 			Type:  builtinMetrics.VUs.Type,
 			Time:  toMicroSecond(now),
-			Tags:  tags,
+			Tags:  enctags,
 			Value: 1.0,
 		},
 	}}
@@ -266,7 +273,7 @@ func runCloudOutputTestCase(t *testing.T, minSamples int) {
 			Data: func(data interface{}) {
 				aggrData, ok := data.(*SampleDataAggregatedHTTPReqs)
 				assert.True(t, ok)
-				assert.True(t, aggrData.Tags.IsEqual(expectedTags))
+				assert.JSONEq(t, `{"test": "mest", "a": "b", "name": "name", "url": "name"}`, string(aggrData.Tags))
 				assert.Equal(t, out.config.AggregationMinSamples.Int64, int64(aggrData.Count))
 				assert.Equal(t, "aggregated_trend", aggrData.Type)
 				assert.InDelta(t, now.UnixNano(), aggrData.Time*1000, float64(out.config.AggregationPeriod.Duration))
@@ -287,7 +294,10 @@ func runCloudOutputTestCase(t *testing.T, minSamples int) {
 
 func TestCloudOutputMaxPerPacket(t *testing.T) {
 	t.Parallel()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(metrics.NewRegistry())
+
+	registry := metrics.NewRegistry()
+	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
+
 	tb := httpmultibin.NewHTTPMultiBin(t)
 	maxMetricSamplesPerPackage := 20
 	tb.Mux.HandleFunc("/v1/tests", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -317,7 +327,7 @@ func TestCloudOutputMaxPerPacket(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, err)
 	now := time.Now()
-	tags := metrics.IntoSampleTags(&map[string]string{"test": "mest", "a": "b"})
+	tags := registry.RootTagSet().WithTagsFromMap(map[string]string{"test": "mest", "a": "b"})
 	gotTheLimit := false
 	var m sync.Mutex
 
@@ -338,10 +348,12 @@ func TestCloudOutputMaxPerPacket(t *testing.T) {
 	require.NoError(t, out.Start())
 
 	out.AddMetricSamples([]metrics.SampleContainer{metrics.Sample{
-		Time:   now,
-		Metric: builtinMetrics.VUs,
-		Tags:   metrics.NewSampleTags(tags.CloneTags()),
-		Value:  1.0,
+		TimeSeries: metrics.TimeSeries{
+			Metric: builtinMetrics.VUs,
+			Tags:   tags,
+		},
+		Time:  now,
+		Value: 1.0,
 	}})
 	for j := time.Duration(1); j <= 200; j++ {
 		container := make([]metrics.SampleContainer, 0, 500)
@@ -357,7 +369,7 @@ func TestCloudOutputMaxPerPacket(t *testing.T) {
 				EndTime:      now.Add(i * 100),
 				ConnDuration: 500 * time.Millisecond,
 				Duration:     j * i * 1500 * time.Millisecond,
-				Tags:         metrics.NewSampleTags(tags.CloneTags()),
+				Tags:         tags,
 			})
 		}
 		out.AddMetricSamples(container)
@@ -381,8 +393,10 @@ func TestCloudOutputStopSendingMetric(t *testing.T) {
 }
 
 func testCloudOutputStopSendingMetric(t *testing.T, stopOnError bool) {
-	tb := httpmultibin.NewHTTPMultiBin(t)
+	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(metrics.NewRegistry())
+
+	tb := httpmultibin.NewHTTPMultiBin(t)
 	tb.Mux.HandleFunc("/v1/tests", http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		body, err := ioutil.ReadAll(req.Body)
 		require.NoError(t, err)
@@ -432,7 +446,7 @@ func testCloudOutputStopSendingMetric(t *testing.T, stopOnError bool) {
 	}
 	require.NoError(t, err)
 	now := time.Now()
-	tags := metrics.IntoSampleTags(&map[string]string{"test": "mest", "a": "b"})
+	tags := registry.RootTagSet().WithTagsFromMap(map[string]string{"test": "mest", "a": "b"})
 
 	count := 1
 	max := 5
@@ -463,10 +477,12 @@ func testCloudOutputStopSendingMetric(t *testing.T, stopOnError bool) {
 	require.NoError(t, out.Start())
 
 	out.AddMetricSamples([]metrics.SampleContainer{metrics.Sample{
-		Time:   now,
-		Metric: builtinMetrics.VUs,
-		Tags:   metrics.NewSampleTags(tags.CloneTags()),
-		Value:  1.0,
+		TimeSeries: metrics.TimeSeries{
+			Metric: builtinMetrics.VUs,
+			Tags:   tags,
+		},
+		Time:  now,
+		Value: 1.0,
 	}})
 	for j := time.Duration(1); j <= 200; j++ {
 		container := make([]metrics.SampleContainer, 0, 500)
@@ -482,7 +498,7 @@ func testCloudOutputStopSendingMetric(t *testing.T, stopOnError bool) {
 				EndTime:      now.Add(i * 100),
 				ConnDuration: 500 * time.Millisecond,
 				Duration:     j * i * 1500 * time.Millisecond,
-				Tags:         metrics.NewSampleTags(tags.CloneTags()),
+				Tags:         tags,
 			})
 		}
 		out.AddMetricSamples(container)
@@ -503,10 +519,12 @@ func testCloudOutputStopSendingMetric(t *testing.T, stopOnError bool) {
 	nBufferSamples := len(out.bufferSamples)
 	nBufferHTTPTrails := len(out.bufferHTTPTrails)
 	out.AddMetricSamples([]metrics.SampleContainer{metrics.Sample{
-		Time:   now,
-		Metric: builtinMetrics.VUs,
-		Tags:   metrics.NewSampleTags(tags.CloneTags()),
-		Value:  1.0,
+		TimeSeries: metrics.TimeSeries{
+			Metric: builtinMetrics.VUs,
+			Tags:   tags,
+		},
+		Time:  now,
+		Value: 1.0,
 	}})
 	if nBufferSamples != len(out.bufferSamples) || nBufferHTTPTrails != len(out.bufferHTTPTrails) {
 		t.Errorf("Output still collects data after stop sending metrics")
@@ -585,7 +603,10 @@ func TestCloudOutputAggregationPeriodZeroNoBlock(t *testing.T) {
 
 func TestCloudOutputPushRefID(t *testing.T) {
 	t.Parallel()
+
+	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(metrics.NewRegistry())
+
 	expSamples := make(chan []Sample)
 	defer close(expSamples)
 
@@ -618,13 +639,17 @@ func TestCloudOutputPushRefID(t *testing.T) {
 	assert.Equal(t, "333", out.referenceID)
 
 	now := time.Now()
-	tags := metrics.IntoSampleTags(&map[string]string{"test": "mest", "a": "b"})
+	tags := registry.RootTagSet().WithTagsFromMap(map[string]string{"test": "mest", "a": "b"})
+	encodedTags, err := json.Marshal(tags)
+	require.NoError(t, err)
 
 	out.AddMetricSamples([]metrics.SampleContainer{metrics.Sample{
-		Time:   now,
-		Metric: builtinMetrics.HTTPReqDuration,
-		Tags:   tags,
-		Value:  123.45,
+		TimeSeries: metrics.TimeSeries{
+			Metric: builtinMetrics.HTTPReqDuration,
+			Tags:   tags,
+		},
+		Time:  now,
+		Value: 123.45,
 	}})
 	exp := []Sample{{
 		Type:   DataTypeSingle,
@@ -632,7 +657,7 @@ func TestCloudOutputPushRefID(t *testing.T) {
 		Data: &SampleDataSingle{
 			Type:  builtinMetrics.HTTPReqDuration.Type,
 			Time:  toMicroSecond(now),
-			Tags:  tags,
+			Tags:  encodedTags,
 			Value: 123.45,
 		},
 	}}
@@ -648,7 +673,8 @@ func TestCloudOutputPushRefID(t *testing.T) {
 
 func TestCloudOutputRecvIterLIAllIterations(t *testing.T) {
 	t.Parallel()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(metrics.NewRegistry())
+	registry := metrics.NewRegistry()
+	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 	tb := httpmultibin.NewHTTPMultiBin(t)
 	tb.Mux.HandleFunc("/v1/tests", http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		body, err := ioutil.ReadAll(req.Body)
@@ -717,19 +743,28 @@ func TestCloudOutputRecvIterLIAllIterations(t *testing.T) {
 		EndTime:       now,
 		Samples: []metrics.Sample{
 			{
-				Time:   now,
-				Metric: builtinMetrics.DataSent,
-				Value:  float64(200),
+				TimeSeries: metrics.TimeSeries{
+					Metric: builtinMetrics.DataSent,
+					Tags:   registry.RootTagSet(),
+				},
+				Time:  now,
+				Value: float64(200),
 			},
 			{
-				Time:   now,
-				Metric: builtinMetrics.DataReceived,
-				Value:  float64(100),
+				TimeSeries: metrics.TimeSeries{
+					Metric: builtinMetrics.DataReceived,
+					Tags:   registry.RootTagSet(),
+				},
+				Time:  now,
+				Value: float64(100),
 			},
 			{
-				Time:   now,
-				Metric: builtinMetrics.Iterations,
-				Value:  1,
+				TimeSeries: metrics.TimeSeries{
+					Metric: builtinMetrics.Iterations,
+					Tags:   registry.RootTagSet(),
+				},
+				Time:  now,
+				Value: 1,
 			},
 		},
 	}

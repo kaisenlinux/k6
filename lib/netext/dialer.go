@@ -74,38 +74,50 @@ func (d *Dialer) DialContext(ctx context.Context, proto, addr string) (net.Conn,
 // TODO: Refactor this according to
 // https://github.com/k6io/k6/pull/1203#discussion_r337938370
 func (d *Dialer) GetTrail(
-	startTime, endTime time.Time, fullIteration bool, emitIterations bool, tags *metrics.SampleTags,
+	startTime, endTime time.Time, fullIteration bool, emitIterations bool, ctm metrics.TagsAndMeta,
 	builtinMetrics *metrics.BuiltinMetrics,
 ) *NetTrail {
 	bytesWritten := atomic.SwapInt64(&d.BytesWritten, 0)
 	bytesRead := atomic.SwapInt64(&d.BytesRead, 0)
 	samples := []metrics.Sample{
 		{
-			Time:   endTime,
-			Metric: builtinMetrics.DataSent,
-			Value:  float64(bytesWritten),
-			Tags:   tags,
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.DataSent,
+				Tags:   ctm.Tags,
+			},
+			Time:     endTime,
+			Metadata: ctm.Metadata,
+			Value:    float64(bytesWritten),
 		},
 		{
-			Time:   endTime,
-			Metric: builtinMetrics.DataReceived,
-			Value:  float64(bytesRead),
-			Tags:   tags,
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.DataReceived,
+				Tags:   ctm.Tags,
+			},
+			Time:     endTime,
+			Metadata: ctm.Metadata,
+			Value:    float64(bytesRead),
 		},
 	}
 	if fullIteration {
 		samples = append(samples, metrics.Sample{
-			Time:   endTime,
-			Metric: builtinMetrics.IterationDuration,
-			Value:  metrics.D(endTime.Sub(startTime)),
-			Tags:   tags,
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.IterationDuration,
+				Tags:   ctm.Tags,
+			},
+			Time:     endTime,
+			Metadata: ctm.Metadata,
+			Value:    metrics.D(endTime.Sub(startTime)),
 		})
 		if emitIterations {
 			samples = append(samples, metrics.Sample{
-				Time:   endTime,
-				Metric: builtinMetrics.Iterations,
-				Value:  1,
-				Tags:   tags,
+				TimeSeries: metrics.TimeSeries{
+					Metric: builtinMetrics.Iterations,
+					Tags:   ctm.Tags,
+				},
+				Time:     endTime,
+				Metadata: ctm.Metadata,
+				Value:    1,
 			})
 		}
 	}
@@ -116,7 +128,7 @@ func (d *Dialer) GetTrail(
 		FullIteration: fullIteration,
 		StartTime:     startTime,
 		EndTime:       endTime,
-		Tags:          tags,
+		Tags:          ctm.Tags,
 		Samples:       samples,
 	}
 }
@@ -202,7 +214,7 @@ type NetTrail struct {
 	FullIteration bool
 	StartTime     time.Time
 	EndTime       time.Time
-	Tags          *metrics.SampleTags
+	Tags          *metrics.TagSet
 	Samples       []metrics.Sample
 }
 
@@ -215,7 +227,7 @@ func (ntr *NetTrail) GetSamples() []metrics.Sample {
 }
 
 // GetTags implements the metrics.ConnectedSampleContainer interface.
-func (ntr *NetTrail) GetTags() *metrics.SampleTags {
+func (ntr *NetTrail) GetTags() *metrics.TagSet {
 	return ntr.Tags
 }
 

@@ -1,14 +1,14 @@
 #!/usr/bin/make -f
 
 include /usr/share/dpkg/default.mk
-export GOPATH=$(CURDIR)/obj-x86_64-linux-gnu
+export GOPATH=$(CURDIR)/_build
 
 %:
 	dh $@ --buildsystem=golang
 
 override_dh_auto_clean:
 	rm -rf $(CURDIR)/dist/*
-	rm -rf $(CURDIR)/obj-x86_64-linux-gnu
+	rm -rf $(CURDIR)/_build
 
 override_dh_auto_build:
 	$(CURDIR)/build-release.sh

@@ -50,25 +50,64 @@ func generateTestMetricSamples(t testing.TB) ([]metrics.SampleContainer, func(io
 	time2 := time1.Add(10 * time.Second)
 	time3 := time2.Add(10 * time.Second)
 
-	connTags := metrics.NewSampleTags(map[string]string{"key": "val"})
+	connTags := registry.RootTagSet().With("key", "val")
 
 	samples := []metrics.SampleContainer{
-		metrics.Sample{Time: time1, Metric: metric1, Value: float64(1), Tags: metrics.NewSampleTags(map[string]string{"tag1": "val1"})},
-		metrics.Sample{Time: time1, Metric: metric1, Value: float64(2), Tags: metrics.NewSampleTags(map[string]string{"tag2": "val2"})},
+		metrics.Sample{
+			TimeSeries: metrics.TimeSeries{
+				Metric: metric1,
+				Tags:   registry.RootTagSet().With("tag1", "val1"),
+			},
+			Time:     time1,
+			Value:    float64(1),
+			Metadata: map[string]string{"meta1": "foo", "meta2": "bar"},
+		},
+		metrics.Sample{
+			TimeSeries: metrics.TimeSeries{
+				Metric: metric1,
+				Tags:   registry.RootTagSet().With("tag2", "val2"),
+			},
+			Time:  time1,
+			Value: float64(2),
+			// Metadata is nil,
+		},
 		metrics.ConnectedSamples{Samples: []metrics.Sample{
-			{Time: time2, Metric: metric2, Value: float64(3), Tags: connTags},
-			{Time: time2, Metric: metric1, Value: float64(4), Tags: connTags},
+			{
+				TimeSeries: metrics.TimeSeries{
+					Metric: metric2,
+					Tags:   connTags,
+				},
+				Time:     time2,
+				Value:    float64(3),
+				Metadata: map[string]string{},
+			},
+			{
+				TimeSeries: metrics.TimeSeries{
+					Metric: metric1,
+					Tags:   connTags,
+				},
+				Time:  time2,
+				Value: float64(4),
+			},
 		}, Time: time2, Tags: connTags},
-		metrics.Sample{Time: time3, Metric: metric2, Value: float64(5), Tags: metrics.NewSampleTags(map[string]string{"tag3": "val3"})},
+		metrics.Sample{
+			TimeSeries: metrics.TimeSeries{
+				Metric: metric2,
+				Tags:   registry.RootTagSet().With("tag3", "val3").With("tag4", "val4"),
+			},
+			Time:     time3,
+			Value:    float64(5),
+			Metadata: map[string]string{"meta3": "metaval3"},
+		},
 	}
 	expected := []string{
 		`{"type":"Metric","data":{"name":"my_metric1","type":"gauge","contains":"default","thresholds":["rate<0.01","p(99)<250"],"submetrics":[{"name":"my_metric1{a:1,b:2}","suffix":"a:1,b:2","tags":{"a":"1","b":"2"}}]},"metric":"my_metric1"}`,
-		`{"type":"Point","data":{"time":"2021-02-24T13:37:10Z","value":1,"tags":{"tag1":"val1"}},"metric":"my_metric1"}`,
+		`{"type":"Point","data":{"time":"2021-02-24T13:37:10Z","value":1,"tags":{"tag1":"val1"},"metadata":{"meta1":"foo","meta2":"bar"}},"metric":"my_metric1"}`,
 		`{"type":"Point","data":{"time":"2021-02-24T13:37:10Z","value":2,"tags":{"tag2":"val2"}},"metric":"my_metric1"}`,
 		`{"type":"Metric","data":{"name":"my_metric2","type":"counter","contains":"data","thresholds":[],"submetrics":null},"metric":"my_metric2"}`,
 		`{"type":"Point","data":{"time":"2021-02-24T13:37:20Z","value":3,"tags":{"key":"val"}},"metric":"my_metric2"}`,
 		`{"type":"Point","data":{"time":"2021-02-24T13:37:20Z","value":4,"tags":{"key":"val"}},"metric":"my_metric1"}`,
-		`{"type":"Point","data":{"time":"2021-02-24T13:37:30Z","value":5,"tags":{"tag3":"val3"}},"metric":"my_metric2"}`,
+		`{"type":"Point","data":{"time":"2021-02-24T13:37:30Z","value":5,"tags":{"tag3":"val3","tag4":"val4"},"metadata":{"meta3":"metaval3"}},"metric":"my_metric2"}`,
 	}
 
 	return samples, getValidator(t, expected)
@@ -170,7 +209,9 @@ func TestJsonOutputFileGzipped(t *testing.T) {
 func TestWrapSampleWithSamplePointer(t *testing.T) {
 	t.Parallel()
 	out := wrapSample(metrics.Sample{
-		Metric: &metrics.Metric{},
+		TimeSeries: metrics.TimeSeries{
+			Metric: &metrics.Metric{},
+		},
 	})
 	assert.NotEqual(t, out, (*sampleEnvelope)(nil))
 }

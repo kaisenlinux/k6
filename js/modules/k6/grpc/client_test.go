@@ -157,6 +157,38 @@ func TestClient(t *testing.T) {
 			},
 		},
 		{
+			name: "LoadProtosetNotFound",
+			initString: codeBlock{
+				code: `
+			var client = new grpc.Client();
+			client.loadProtoset("./does_not_exist.protoset");`,
+				err: "couldn't open protoset",
+			},
+		},
+		{
+			name: "LoadProtosetWrongFormat",
+			initString: codeBlock{
+				code: `
+			var client = new grpc.Client();
+			client.loadProtoset("../../../../lib/testutils/httpmultibin/grpc_protoset_testing/test_message.proto");`,
+				err: "couldn't unmarshal protoset",
+			},
+		},
+		{
+			name: "LoadProtoset",
+			initString: codeBlock{
+				code: `
+			var client = new grpc.Client();
+			client.loadProtoset("../../../../lib/testutils/httpmultibin/grpc_protoset_testing/test.protoset");`,
+				val: []MethodInfo{
+					{
+						MethodInfo: grpc.MethodInfo{Name: "Test", IsClientStream: false, IsServerStream: false},
+						Package:    "grpc.protoset.testing", Service: "TestService", FullMethod: "/grpc.protoset.testing.TestService/Test",
+					},
+				},
+			},
+		},
+		{
 			name: "ConnectInit",
 			initString: codeBlock{
 				code: `
@@ -259,6 +291,18 @@ func TestClient(t *testing.T) {
 				client.connect("GRPCBIN_ADDR");
 				client.invoke("grpc.testing.TestService/EmptyCall", {}, { void: true })`,
 				err: `unknown param: "void"`,
+			},
+		},
+		{
+			name: "InvokeNilRequest",
+			initString: codeBlock{code: `
+				var client = new grpc.Client();
+				client.load([], "../../../../vendor/google.golang.org/grpc/test/grpc_testing/test.proto");`},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR");
+				client.invoke("grpc.testing.TestService/EmptyCall")`,
+				err: `request cannot be nil`,
 			},
 		},
 		{
@@ -645,6 +689,106 @@ func TestClient(t *testing.T) {
 			},
 		},
 		{
+			name: "MaxReceiveSizeBadParam",
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				reflection.Register(tb.ServerGRPC)
+			},
+			initString: codeBlock{
+				code: `var client = new grpc.Client();`,
+			},
+			vuString: codeBlock{
+				code: `client.connect("GRPCBIN_ADDR", {maxReceiveSize: "error"})`,
+				err:  `invalid maxReceiveSize value: '"error"', it needs to be an integer`,
+			},
+		},
+		{
+			name: "MaxReceiveSizeNonPositiveInteger",
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				reflection.Register(tb.ServerGRPC)
+			},
+			initString: codeBlock{
+				code: `var client = new grpc.Client();`,
+			},
+			vuString: codeBlock{
+				code: `client.connect("GRPCBIN_ADDR", {maxReceiveSize: -1})`,
+				err:  `invalid maxReceiveSize value: '-1, it needs to be a positive integer`,
+			},
+		},
+		{
+			name: "ReceivedMessageLargerThanMax",
+			initString: codeBlock{
+				code: `
+				var client = new grpc.Client();
+				client.load([], "../../../../vendor/google.golang.org/grpc/test/grpc_testing/test.proto");`,
+			},
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				tb.GRPCStub.UnaryCallFunc = func(_ context.Context, req *grpc_testing.SimpleRequest) (*grpc_testing.SimpleResponse, error) {
+					response := &grpc_testing.SimpleResponse{}
+					response.Payload = req.Payload
+					return response, nil
+				}
+			},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR", {maxReceiveSize: 1})
+				var resp = client.invoke("grpc.testing.TestService/UnaryCall", { payload: { body: "testMaxReceiveSize"} })
+				if (resp.status == grpc.StatusResourceExhausted) {
+					throw new Error(resp.error.message)
+				}
+				`,
+				err: `received message larger than max`,
+			},
+		},
+		{
+			name: "MaxSendSizeBadParam",
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				reflection.Register(tb.ServerGRPC)
+			},
+			initString: codeBlock{
+				code: `var client = new grpc.Client();`,
+			},
+			vuString: codeBlock{
+				code: `client.connect("GRPCBIN_ADDR", {maxSendSize: "error"})`,
+				err:  `invalid maxSendSize value: '"error"', it needs to be an integer`,
+			},
+		},
+		{
+			name: "MaxSendSizeNonPositiveInteger",
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				reflection.Register(tb.ServerGRPC)
+			},
+			initString: codeBlock{
+				code: `var client = new grpc.Client();`,
+			},
+			vuString: codeBlock{
+				code: `client.connect("GRPCBIN_ADDR", {maxSendSize: -1})`,
+				err:  `invalid maxSendSize value: '-1, it needs to be a positive integer`,
+			},
+		},
+		{
+			name: "SentMessageLargerThanMax",
+			initString: codeBlock{
+				code: `
+				var client = new grpc.Client();
+				client.load([], "../../../../vendor/google.golang.org/grpc/test/grpc_testing/test.proto");`,
+			},
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				tb.GRPCStub.UnaryCallFunc = func(context.Context, *grpc_testing.SimpleRequest) (*grpc_testing.SimpleResponse, error) {
+					return &grpc_testing.SimpleResponse{}, nil
+				}
+			},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR", {maxSendSize: 1})
+				var resp = client.invoke("grpc.testing.TestService/UnaryCall", { payload: { body: "testMaxSendSize"} })
+				if (resp.status == grpc.StatusResourceExhausted) {
+					throw new Error(resp.error.message)
+				}
+				`,
+				err: `trying to send message larger than max`,
+			},
+		},
+		{
 			name: "Close",
 			initString: codeBlock{
 				code: `
@@ -701,8 +845,10 @@ func TestClient(t *testing.T) {
 			val, err := replace(tt.initString.code)
 			assertResponse(t, tt.initString, err, val, ts)
 
+			registry := metrics.NewRegistry()
 			root, err := lib.NewGroup("", nil)
 			require.NoError(t, err)
+
 			state := &lib.State{
 				Group:     root,
 				Dialer:    ts.httpBin.Dialer,
@@ -715,10 +861,8 @@ func TestClient(t *testing.T) {
 					),
 					UserAgent: null.StringFrom("k6-test"),
 				},
-				BuiltinMetrics: metrics.RegisterBuiltinMetrics(
-					metrics.NewRegistry(),
-				),
-				Tags: lib.NewTagMap(nil),
+				BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
+				Tags:           lib.NewVUStateTags(registry.RootTagSet()),
 			}
 			ts.MoveToVUContext(state)
 			val, err = replace(tt.vuString.code)
@@ -803,6 +947,8 @@ func TestDebugStat(t *testing.T) {
 func TestClientInvokeHeadersDeprecated(t *testing.T) {
 	t.Parallel()
 
+	registry := metrics.NewRegistry()
+
 	logHook := &testutils.SimpleLogrusHook{
 		HookedLevels: []logrus.Level{logrus.WarnLevel},
 	}
@@ -810,19 +956,24 @@ func TestClientInvokeHeadersDeprecated(t *testing.T) {
 	testLog.AddHook(logHook)
 	testLog.SetOutput(ioutil.Discard)
 
+	rt := goja.New()
 	c := Client{
 		vu: &modulestest.VU{
 			StateField: &lib.State{
-				Logger: testLog,
+				BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
+				Logger:         testLog,
+				Tags:           lib.NewVUStateTags(registry.RootTagSet()),
 			},
+			RuntimeField: rt,
 		},
 	}
-	params := map[string]interface{}{
+
+	params := rt.ToValue(map[string]interface{}{
 		"headers": map[string]interface{}{
 			"X-HEADER-FOO": "bar",
 		},
-	}
-	_, err := c.parseParams(params)
+	})
+	_, err := c.parseInvokeParams(params)
 	require.NoError(t, err)
 
 	entries := logHook.Drain()

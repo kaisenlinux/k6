@@ -154,6 +154,7 @@ func (e *EventLoop) popAll() (queue []func() error, awaiting bool) {
 // or a queued function returns an error. The provided firstCallback will be the first thing executed.
 // After Start returns the event loop can be reused as long as waitOnRegistered is called.
 func (e *EventLoop) Start(firstCallback func() error) error {
+	e.pendingPromiseRejections = make(map[*goja.Promise]struct{})
 	e.queue = []func() error{firstCallback}
 	for {
 		queue, awaiting := e.popAll()
@@ -175,12 +176,13 @@ func (e *EventLoop) Start(firstCallback func() error) error {
 		// This will get a random unhandled rejection instead of the first one, for example.
 		// But that seems to be the case in other tools as well so it seems to not be that big of a problem.
 		for promise := range e.pendingPromiseRejections {
-			// TODO maybe throw the whole promise up and get make a better message outside of the event loop
 			value := promise.Result()
-			if o := value.ToObject(e.vu.Runtime()); o != nil {
-				stack := o.Get("stack")
-				if stack != nil {
-					value = stack
+			if !goja.IsNull(value) && !goja.IsUndefined(value) {
+				if o := value.ToObject(e.vu.Runtime()); o != nil {
+					stack := o.Get("stack")
+					if stack != nil {
+						value = e.vu.Runtime().ToValue(fmt.Sprintf("%s: %s\n", value, stack))
+					}
 				}
 			}
 			// this is the de facto wording in both firefox and deno at least

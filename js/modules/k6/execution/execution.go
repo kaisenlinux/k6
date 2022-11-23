@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"time"
 
 	"github.com/dop251/goja"
@@ -13,6 +12,7 @@ import (
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/lib"
+	"go.k6.io/k6/metrics"
 )
 
 type (
@@ -213,8 +213,8 @@ func (mi *ModuleInstance) newVUInfo() (*goja.Object, error) {
 	}
 
 	err = o.Set("tags", rt.NewDynamicObject(&tagsDynamicObject{
-		Runtime: rt,
-		State:   vuState,
+		runtime: rt,
+		state:   vuState,
 	}))
 	return o, err
 }
@@ -296,69 +296,68 @@ func optionsAsObject(rt *goja.Runtime, options lib.Options) (*goja.Object, error
 }
 
 type tagsDynamicObject struct {
-	Runtime *goja.Runtime
-	State   *lib.State
+	runtime *goja.Runtime
+	state   *lib.State
 }
 
 // Get a property value for the key. May return nil if the property does not exist.
 func (o *tagsDynamicObject) Get(key string) goja.Value {
-	tag, ok := o.State.Tags.Get(key)
-	if !ok {
-		return nil
+	tcv := o.state.Tags.GetCurrentValues()
+	if tag, ok := tcv.Tags.Get(key); ok {
+		return o.runtime.ToValue(tag)
 	}
-	return o.Runtime.ToValue(tag)
+	if metadatum, ok := tcv.Metadata[key]; ok {
+		return o.runtime.ToValue(metadatum)
+	}
+	return nil
 }
 
-// Set a property value for the key. It returns true if succeed.
-// String, Boolean and Number types are implicitly converted
-// to the goja's relative string representation.
-// In any other case, if the Throw option is set then an error is raised
-// otherwise just a Warning is written.
+// Set a property value for the key. It returns true if succeed. String, Boolean
+// and Number types are implicitly converted to the goja's relative string
+// representation. An exception is raised in case a denied type is provided.
 func (o *tagsDynamicObject) Set(key string, val goja.Value) bool {
-	kind := reflect.Invalid
-	if typ := val.ExportType(); typ != nil {
-		kind = typ.Kind()
-	}
-	switch kind {
-	case
-		reflect.String,
-		reflect.Bool,
-		reflect.Int64,
-		reflect.Float64:
-
-		o.State.Tags.Set(key, val.String())
-		return true
-	default:
-		reason := "only String, Boolean and Number types are accepted as a Tag value"
-		if o.State.Options.Throw.Bool {
-			panic(o.Runtime.NewTypeError(reason))
+	var err error
+	o.state.Tags.Modify(func(tagsAndMeta *metrics.TagsAndMeta) {
+		err = common.ApplyCustomUserTag(o.runtime, tagsAndMeta, key, val)
+		if err != nil {
+			panic(o.runtime.NewTypeError(err.Error()))
 		}
-		o.State.Logger.Warnf("the execution.vu.tags.Set('%s') operation has been discarded because %s", key, reason)
-		return false
-	}
+	})
+	return true
 }
 
 // Has returns true if the property exists.
 func (o *tagsDynamicObject) Has(key string) bool {
-	_, ok := o.State.Tags.Get(key)
-	return ok
+	ctv := o.state.Tags.GetCurrentValues()
+	if _, ok := ctv.Tags.Get(key); ok {
+		return true
+	}
+	if _, ok := ctv.Metadata[key]; ok {
+		return true
+	}
+	return false
 }
 
-// Delete deletes the property for the key. It returns true on success (note, that includes missing property).
+// Delete deletes the property for the key. It returns true on success (note,
+// that includes missing property).
 func (o *tagsDynamicObject) Delete(key string) bool {
-	o.State.Tags.Delete(key)
+	o.state.Tags.Modify(func(tagsAndMeta *metrics.TagsAndMeta) {
+		tagsAndMeta.DeleteTag(key)
+	})
 	return true
 }
 
-// Keys returns a slice with all existing property keys. The order is not deterministic.
+// Keys returns a slice with all existing property keys. The order is not
+// deterministic.
 func (o *tagsDynamicObject) Keys() []string {
-	if o.State.Tags.Len() < 1 {
-		return nil
-	}
+	ctv := o.state.Tags.GetCurrentValues()
 
-	tags := o.State.Tags.Clone()
-	keys := make([]string, 0, len(tags))
-	for k := range tags {
+	tagsMap := ctv.Tags.Map()
+	keys := make([]string, 0, len(tagsMap)+len(ctv.Metadata))
+	for k := range tagsMap {
+		keys = append(keys, k)
+	}
+	for k := range ctv.Metadata {
 		keys = append(keys, k)
 	}
 	return keys

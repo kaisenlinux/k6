@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,10 +20,10 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/guregu/null.v3"
-
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/metrics"
+	"golang.org/x/time/rate"
+	"gopkg.in/guregu/null.v3"
 )
 
 type reader func([]byte) (int, error)
@@ -100,7 +101,7 @@ func TestMakeRequestError(t *testing.T) {
 		state := &lib.State{
 			Transport: http.DefaultTransport,
 			Logger:    logrus.New(),
-			Tags:      lib.NewTagMap(nil),
+			Tags:      lib.NewVUStateTags(metrics.NewRegistry().RootTagSet()),
 		}
 		_, err = MakeRequest(ctx, state, preq)
 		require.Error(t, err)
@@ -122,14 +123,15 @@ func TestMakeRequestError(t *testing.T) {
 		state := &lib.State{
 			Transport: srv.Client().Transport,
 			Logger:    logger,
-			Tags:      lib.NewTagMap(nil),
+			Tags:      lib.NewVUStateTags(metrics.NewRegistry().RootTagSet()),
 		}
 		req, _ := http.NewRequest("GET", srv.URL, nil)
 		preq := &ParsedHTTPRequest{
-			Req:     req,
-			URL:     &URL{u: req.URL},
-			Body:    new(bytes.Buffer),
-			Timeout: 10 * time.Second,
+			Req:         req,
+			URL:         &URL{u: req.URL},
+			Body:        new(bytes.Buffer),
+			Timeout:     10 * time.Second,
+			TagsAndMeta: state.Tags.GetCurrentValues(),
 		}
 
 		res, err := MakeRequest(ctx, state, preq)
@@ -174,7 +176,7 @@ func TestResponseStatus(t *testing.T) {
 					Logger:         logger,
 					Samples:        samples,
 					BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
-					Tags:           lib.NewTagMap(nil),
+					Tags:           lib.NewVUStateTags(registry.RootTagSet()),
 				}
 				req, err := http.NewRequest("GET", server.URL, nil)
 				require.NoError(t, err)
@@ -185,6 +187,7 @@ func TestResponseStatus(t *testing.T) {
 					Body:         new(bytes.Buffer),
 					Timeout:      10 * time.Second,
 					ResponseType: ResponseTypeNone,
+					TagsAndMeta:  state.Tags.GetCurrentValues(),
 				}
 
 				ctx, cancel := context.WithCancel(context.Background())
@@ -255,7 +258,7 @@ func TestMakeRequestTimeoutInTheMiddle(t *testing.T) {
 		Logger:         logger,
 		BPool:          bpool.NewBufferPool(100),
 		BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
-		Tags:           lib.NewTagMap(nil),
+		Tags:           lib.NewVUStateTags(registry.RootTagSet()),
 	}
 	req, _ := http.NewRequest("GET", srv.URL, nil)
 	preq := &ParsedHTTPRequest{
@@ -264,6 +267,7 @@ func TestMakeRequestTimeoutInTheMiddle(t *testing.T) {
 		Body:             new(bytes.Buffer),
 		Timeout:          50 * time.Millisecond,
 		ResponseCallback: func(i int) bool { return i == 0 },
+		TagsAndMeta:      state.Tags.GetCurrentValues(),
 	}
 
 	res, err := MakeRequest(ctx, state, preq)
@@ -283,7 +287,8 @@ func TestMakeRequestTimeoutInTheMiddle(t *testing.T) {
 		"name":              srv.URL,
 	}
 	for _, s := range allSamples {
-		assert.Equal(t, expTags, s.Tags.CloneTags())
+		assert.Equal(t, expTags, s.Tags.Map())
+		assert.Nil(t, s.Metadata)
 	}
 }
 
@@ -331,7 +336,7 @@ func TestTrailFailed(t *testing.T) {
 				Logger:         logger,
 				BPool:          bpool.NewBufferPool(2),
 				BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
-				Tags:           lib.NewTagMap(nil),
+				Tags:           lib.NewVUStateTags(registry.RootTagSet()),
 			}
 			req, _ := http.NewRequest("GET", srv.URL, nil)
 			preq := &ParsedHTTPRequest{
@@ -340,6 +345,7 @@ func TestTrailFailed(t *testing.T) {
 				Body:             new(bytes.Buffer),
 				Timeout:          10 * time.Millisecond,
 				ResponseCallback: responseCallback,
+				TagsAndMeta:      state.Tags.GetCurrentValues(),
 			}
 			res, err := MakeRequest(ctx, state, preq)
 
@@ -396,7 +402,7 @@ func TestMakeRequestDialTimeout(t *testing.T) {
 		Logger:         logger,
 		BPool:          bpool.NewBufferPool(100),
 		BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
-		Tags:           lib.NewTagMap(nil),
+		Tags:           lib.NewVUStateTags(registry.RootTagSet()),
 	}
 
 	req, _ := http.NewRequest("GET", "http://"+addr.String(), nil)
@@ -406,6 +412,7 @@ func TestMakeRequestDialTimeout(t *testing.T) {
 		Body:             new(bytes.Buffer),
 		Timeout:          500 * time.Millisecond,
 		ResponseCallback: func(i int) bool { return i == 0 },
+		TagsAndMeta:      state.Tags.GetCurrentValues(),
 	}
 
 	res, err := MakeRequest(ctx, state, preq)
@@ -425,7 +432,8 @@ func TestMakeRequestDialTimeout(t *testing.T) {
 		"name":              req.URL.String(),
 	}
 	for _, s := range allSamples {
-		assert.Equal(t, expTags, s.Tags.CloneTags())
+		assert.Equal(t, expTags, s.Tags.Map())
+		assert.Nil(t, s.Metadata)
 	}
 }
 
@@ -450,7 +458,7 @@ func TestMakeRequestTimeoutInTheBegining(t *testing.T) {
 		Logger:         logger,
 		BPool:          bpool.NewBufferPool(100),
 		BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
-		Tags:           lib.NewTagMap(nil),
+		Tags:           lib.NewVUStateTags(registry.RootTagSet()),
 	}
 	req, _ := http.NewRequest("GET", srv.URL, nil)
 	preq := &ParsedHTTPRequest{
@@ -459,6 +467,7 @@ func TestMakeRequestTimeoutInTheBegining(t *testing.T) {
 		Body:             new(bytes.Buffer),
 		Timeout:          50 * time.Millisecond,
 		ResponseCallback: func(i int) bool { return i == 0 },
+		TagsAndMeta:      state.Tags.GetCurrentValues(),
 	}
 
 	res, err := MakeRequest(ctx, state, preq)
@@ -478,6 +487,69 @@ func TestMakeRequestTimeoutInTheBegining(t *testing.T) {
 		"name":              srv.URL,
 	}
 	for _, s := range allSamples {
-		assert.Equal(t, expTags, s.Tags.CloneTags())
+		assert.Equal(t, expTags, s.Tags.Map())
+		assert.Nil(t, s.Metadata)
+	}
+}
+
+func TestMakeRequestRPSLimit(t *testing.T) {
+	t.Parallel()
+	var requests int64
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&requests, 1)
+	}))
+	defer ts.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	samples := make(chan metrics.SampleContainer, 10)
+	go func() {
+		for {
+			select {
+			case <-samples:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	logger := logrus.New()
+	logger.Out = io.Discard
+
+	registry := metrics.NewRegistry()
+	state := &lib.State{
+		Options: lib.Options{
+			SystemTags: &metrics.DefaultSystemTagSet,
+		},
+		RPSLimit:       rate.NewLimiter(rate.Limit(1), 1),
+		Transport:      ts.Client().Transport,
+		Samples:        samples,
+		Logger:         logger,
+		BPool:          bpool.NewBufferPool(100),
+		BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
+		Tags:           lib.NewVUStateTags(registry.RootTagSet()),
+	}
+
+	timer := time.NewTimer(3 * time.Second)
+	for {
+		select {
+		case <-timer.C:
+			timer.Stop()
+			val := atomic.LoadInt64(&requests)
+			assert.NotEmpty(t, val)
+			assert.InDelta(t, val, 3, 3)
+			return
+		default:
+			req, _ := http.NewRequest("GET", ts.URL, nil)
+			preq := &ParsedHTTPRequest{
+				Req:         req,
+				URL:         &URL{u: req.URL, URL: ts.URL, Name: ts.URL},
+				Timeout:     10 * time.Millisecond,
+				TagsAndMeta: state.Tags.GetCurrentValues(),
+			}
+			_, err := MakeRequest(ctx, state, preq)
+			require.NoError(t, err)
+		}
 	}
 }
