@@ -15,12 +15,14 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v3"
 
-	"go.k6.io/k6/core"
-	"go.k6.io/k6/core/local"
+	"go.k6.io/k6/execution"
 	"go.k6.io/k6/js"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/types"
 	"go.k6.io/k6/loader"
+	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/metrics/engine"
+	"go.k6.io/k6/output"
 )
 
 func TestSetupData(t *testing.T) {
@@ -136,30 +138,38 @@ func TestSetupData(t *testing.T) {
 				TeardownTimeout: types.NullDurationFrom(5 * time.Second),
 			}, runner)
 
-			execScheduler, err := local.NewExecutionScheduler(testState)
+			execScheduler, err := execution.NewScheduler(testState)
 			require.NoError(t, err)
-			engine, err := core.NewEngine(testState, execScheduler, nil)
+			metricsEngine, err := engine.NewMetricsEngine(testState)
 			require.NoError(t, err)
-
-			require.NoError(t, engine.OutputManager.StartOutputs())
-			defer engine.OutputManager.StopOutputs()
 
 			globalCtx, globalCancel := context.WithCancel(context.Background())
-			runCtx, runCancel := context.WithCancel(globalCtx)
-			run, wait, err := engine.Init(globalCtx, runCtx)
-			require.NoError(t, err)
-
-			defer wait()
 			defer globalCancel()
+			runCtx, runAbort := execution.NewTestRunContext(globalCtx, testState.Logger)
+			defer runAbort(fmt.Errorf("unexpected abort"))
+
+			outputManager := output.NewManager([]output.Output{metricsEngine.CreateIngester()}, testState.Logger, runAbort)
+			samples := make(chan metrics.SampleContainer, 1000)
+			_, stopOutputs, err := outputManager.Start(samples)
+			require.NoError(t, err)
+			defer stopOutputs(nil)
+
+			cs := &ControlSurface{
+				RunCtx:        runCtx,
+				Samples:       samples,
+				MetricsEngine: metricsEngine,
+				Scheduler:     execScheduler,
+				RunState:      testState,
+			}
 
 			errC := make(chan error)
-			go func() { errC <- run() }()
+			go func() { errC <- execScheduler.Run(globalCtx, runCtx, samples) }()
 
-			handler := NewHandler()
+			handler := NewHandler(cs)
 
 			checkSetup := func(method, body, expResult string) {
 				rw := httptest.NewRecorder()
-				handler.ServeHTTP(rw, newRequestWithEngine(engine, method, "/v1/setup", bytes.NewBufferString(body)))
+				handler.ServeHTTP(rw, httptest.NewRequest(method, "/v1/setup", bytes.NewBufferString(body)))
 				res := rw.Result()
 				if !assert.Equal(t, http.StatusOK, res.StatusCode) {
 					t.Logf("body: %s\n", rw.Body.String())
@@ -179,14 +189,13 @@ func TestSetupData(t *testing.T) {
 				checkSetup(setupRun[0], setupRun[1], setupRun[2])
 			}
 
-			require.NoError(t, engine.ExecutionScheduler.SetPaused(false))
+			require.NoError(t, cs.Scheduler.SetPaused(false))
 
 			select {
 			case <-time.After(10 * time.Second):
-				runCancel()
 				t.Fatal("Test timed out")
 			case err := <-errC:
-				runCancel()
+				close(samples)
 				require.NoError(t, err)
 			}
 		})

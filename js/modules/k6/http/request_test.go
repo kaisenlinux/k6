@@ -27,8 +27,9 @@ import (
 	"testing"
 	"time"
 
+	"go.k6.io/k6/lib/types"
+
 	"github.com/andybalholm/brotli"
-	"github.com/dop251/goja"
 	"github.com/klauspost/compress/zstd"
 	"github.com/mccutchen/go-httpbin/httpbin"
 	"github.com/oxtoacart/bpool"
@@ -117,9 +118,14 @@ func assertRequestMetricsEmittedSingle(t *testing.T, sampleContainer metrics.Sam
 	}
 }
 
-func newRuntime(t testing.TB) (
-	*httpmultibin.HTTPMultiBin, *lib.State, chan metrics.SampleContainer, *goja.Runtime, *ModuleInstance,
-) {
+type httpTestCase struct {
+	tb       *httpmultibin.HTTPMultiBin
+	runtime  *modulestest.Runtime
+	samples  chan metrics.SampleContainer
+	instance *ModuleInstance
+}
+
+func newTestCase(t testing.TB) *httpTestCase {
 	tb := httpmultibin.NewHTTPMultiBin(t)
 
 	root, err := lib.NewGroup("", nil)
@@ -154,15 +160,25 @@ func newRuntime(t testing.TB) (
 		BuiltinMetrics: metrics.RegisterBuiltinMetrics(registry),
 	}
 
-	rt, mi, mockVU := getTestModuleInstance(t)
-	mockVU.InitEnvField = nil
-	mockVU.StateField = state
-	return tb, state, samples, rt, mi
+	runtime, mi := getTestModuleInstance(t)
+
+	runtime.MoveToVUContext(state)
+	return &httpTestCase{
+		tb:       tb,
+		samples:  samples,
+		runtime:  runtime,
+		instance: mi,
+	}
 }
 
-func TestRequestAndBatch(t *testing.T) {
+func TestRequest(t *testing.T) {
 	t.Parallel()
-	tb, state, samples, rt, _ := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	samples := ts.samples
+	rt := ts.runtime.VU.Runtime()
+	state := ts.runtime.VU.State()
+
 	sr := tb.Replacer.Replace
 
 	// Handle paths with custom logic
@@ -1242,333 +1258,6 @@ func TestRequestAndBatch(t *testing.T) {
 		})
 	}
 
-	t.Run("Batch", func(t *testing.T) {
-		t.Run("error", func(t *testing.T) {
-			invalidURLerr := `invalid URL: parse "https:// invalidurl.com": invalid character " " in host name`
-			testCases := []struct {
-				name, code, expErr string
-				throw              bool
-			}{
-				{
-					name: "no arg", code: ``,
-					expErr: `no argument was provided to http.batch()`, throw: true,
-				},
-				{
-					name: "invalid null arg", code: `null`,
-					expErr: `invalid http.batch() argument type <nil>`, throw: true,
-				},
-				{
-					name: "invalid undefined arg", code: `undefined`,
-					expErr: `invalid http.batch() argument type <nil>`, throw: true,
-				},
-				{
-					name: "invalid string arg", code: `"https://somevalidurl.com"`,
-					expErr: `invalid http.batch() argument type string`, throw: true,
-				},
-				{
-					name: "invalid URL short", code: `["https:// invalidurl.com"]`,
-					expErr: invalidURLerr, throw: true,
-				},
-				{
-					name: "invalid URL short no throw", code: `["https:// invalidurl.com"]`,
-					expErr: invalidURLerr, throw: false,
-				},
-				{
-					name: "invalid URL array", code: `[ ["GET", "https:// invalidurl.com"] ]`,
-					expErr: invalidURLerr, throw: true,
-				},
-				{
-					name: "invalid URL array no throw", code: `[ ["GET", "https:// invalidurl.com"] ]`,
-					expErr: invalidURLerr, throw: false,
-				},
-				{
-					name: "invalid URL object", code: `[ {method: "GET", url: "https:// invalidurl.com"} ]`,
-					expErr: invalidURLerr, throw: true,
-				},
-				{
-					name: "invalid object no throw", code: `[ {method: "GET", url: "https:// invalidurl.com"} ]`,
-					expErr: invalidURLerr, throw: false,
-				},
-				{
-					name: "object no url key", code: `[ {method: "GET"} ]`,
-					expErr: `batch request 0 doesn't have a url key`, throw: true,
-				},
-				{
-					name: "multiple arguments", code: `["GET", "https://test.k6.io"],["GET", "https://test.k6.io"]`,
-					expErr: `http.batch() accepts only an array or an object of requests`, throw: true,
-				},
-			}
-
-			for _, tc := range testCases {
-				tc := tc
-				t.Run(tc.name, func(t *testing.T) { //nolint:paralleltest
-					oldThrow := state.Options.Throw.Bool
-					state.Options.Throw.Bool = tc.throw
-					defer func() { state.Options.Throw.Bool = oldThrow }()
-
-					hook := logtest.NewLocal(state.Logger)
-					defer hook.Reset()
-
-					ret, err := rt.RunString(fmt.Sprintf(`
-						(function(){
-							var r = http.batch(%s);
-							if (r.length !== 1) throw new Error('unexpected responses length: '+r.length);
-							return {error: r[0].error, error_code: r[0].error_code};
-						})()`, tc.code))
-					if tc.throw {
-						require.Error(t, err)
-						assert.Contains(t, err.Error(), tc.expErr)
-						require.Nil(t, ret)
-					} else {
-						require.NoError(t, err)
-						require.NotNil(t, ret)
-						var retobj map[string]interface{}
-						var ok bool
-						if retobj, ok = ret.Export().(map[string]interface{}); !ok {
-							require.Fail(t, "got wrong return object: %#+v", retobj)
-						}
-						require.Equal(t, int64(1020), retobj["error_code"])
-						require.Equal(t, invalidURLerr, retobj["error"])
-
-						logEntry := hook.LastEntry()
-						require.NotNil(t, logEntry)
-						assert.Equal(t, logrus.WarnLevel, logEntry.Level)
-						assert.Contains(t, logEntry.Data["error"].(error).Error(), tc.expErr)
-						assert.Equal(t, "A batch request failed", logEntry.Message)
-					}
-				})
-			}
-		})
-		t.Run("error,nopanic", func(t *testing.T) { //nolint:paralleltest
-			invalidURLerr := `invalid URL: parse "https:// invalidurl.com": invalid character " " in host name`
-			testCases := []struct{ name, code string }{
-				{
-					name: "array", code: `[
-						["GET", "https:// invalidurl.com"],
-						["GET", "https://somevalidurl.com"],
-					]`,
-				},
-				{
-					name: "object", code: `[
-						{method: "GET", url: "https:// invalidurl.com"},
-						{method: "GET", url: "https://somevalidurl.com"},
-					]`,
-				},
-			}
-
-			for _, tc := range testCases {
-				tc := tc
-				t.Run(tc.name, func(t *testing.T) { //nolint:paralleltest
-					oldThrow := state.Options.Throw.Bool
-					state.Options.Throw.Bool = false
-					defer func() { state.Options.Throw.Bool = oldThrow }()
-
-					hook := logtest.NewLocal(state.Logger)
-					defer hook.Reset()
-
-					ret, err := rt.RunString(fmt.Sprintf(`
-						(function(){
-							var r = http.batch(%s);
-							if (r.length !== 2) throw new Error('unexpected responses length: '+r.length);
-							if (r[1] !== null) throw new Error('expected response at index 1 to be null');
-							r[0].html();
-							r[0].json();
-	            		    return r[0].error_code; // not reached because of json()
-						})()
-					`, tc.code))
-					require.Error(t, err)
-					assert.Nil(t, ret)
-					assert.Contains(t, err.Error(), "unexpected end of JSON input")
-					logEntry := hook.LastEntry()
-					require.NotNil(t, logEntry)
-					assert.Equal(t, logrus.WarnLevel, logEntry.Level)
-					assert.Contains(t, logEntry.Data["error"].(error).Error(), invalidURLerr)
-					assert.Equal(t, "A batch request failed", logEntry.Message)
-				})
-			}
-		})
-		t.Run("GET", func(t *testing.T) {
-			_, err := rt.RunString(sr(`
-		{
-			let reqs = [
-				["GET", "HTTPBIN_URL/"],
-				["GET", "HTTPBIN_IP_URL/"],
-			];
-			let res = http.batch(reqs);
-			for (var key in res) {
-				if (res[key].status != 200) { throw new Error("wrong status: " + res[key].status); }
-				if (res[key].url != reqs[key][1]) { throw new Error("wrong url: " + res[key].url); }
-			}
-		}`))
-			require.NoError(t, err)
-			bufSamples := metrics.GetBufferedSamples(samples)
-			assertRequestMetricsEmitted(t, bufSamples, "GET", sr("HTTPBIN_URL/"), 200, "")
-			assertRequestMetricsEmitted(t, bufSamples, "GET", sr("HTTPBIN_IP_URL/"), 200, "")
-
-			t.Run("Tagged", func(t *testing.T) {
-				_, err := rt.RunString(sr(`
-			{
-				let fragment = "get";
-				let reqs = [
-					["GET", http.url` + "`" + `HTTPBIN_URL/${fragment}` + "`" + `],
-					["GET", http.url` + "`" + `HTTPBIN_IP_URL/` + "`" + `],
-				];
-				let res = http.batch(reqs);
-				for (var key in res) {
-					if (res[key].status != 200) { throw new Error("wrong status: " + key + ": " + res[key].status); }
-					if (res[key].url != reqs[key][1].url) { throw new Error("wrong url: " + key + ": " + res[key].url + " != " + reqs[key][1].url); }
-				}
-			}`))
-				assert.NoError(t, err)
-				bufSamples := metrics.GetBufferedSamples(samples)
-				assertRequestMetricsEmitted(t, bufSamples, "GET", sr("HTTPBIN_URL/${}"), 200, "")
-				assertRequestMetricsEmitted(t, bufSamples, "GET", sr("HTTPBIN_IP_URL/"), 200, "")
-			})
-
-			t.Run("Shorthand", func(t *testing.T) {
-				_, err := rt.RunString(sr(`
-			{
-				let reqs = [
-					"HTTPBIN_URL/",
-					"HTTPBIN_IP_URL/",
-				];
-				let res = http.batch(reqs);
-				for (var key in res) {
-					if (res[key].status != 200) { throw new Error("wrong status: " + key + ": " + res[key].status); }
-					if (res[key].url != reqs[key]) { throw new Error("wrong url: " + key + ": " + res[key].url); }
-				}
-			}`))
-				assert.NoError(t, err)
-				bufSamples := metrics.GetBufferedSamples(samples)
-				assertRequestMetricsEmitted(t, bufSamples, "GET", sr("HTTPBIN_URL/"), 200, "")
-				assertRequestMetricsEmitted(t, bufSamples, "GET", sr("HTTPBIN_IP_URL/"), 200, "")
-
-				t.Run("Tagged", func(t *testing.T) {
-					_, err := rt.RunString(sr(`
-				{
-					let fragment = "get";
-					let reqs = [
-						http.url` + "`" + `HTTPBIN_URL/${fragment}` + "`" + `,
-						http.url` + "`" + `HTTPBIN_IP_URL/` + "`" + `,
-					];
-					let res = http.batch(reqs);
-					for (var key in res) {
-						if (res[key].status != 200) { throw new Error("wrong status: " + key + ": " + res[key].status); }
-						if (res[key].url != reqs[key].url) { throw new Error("wrong url: " + key + ": " + res[key].url + " != " + reqs[key].url); }
-					}
-				}`))
-					assert.NoError(t, err)
-					bufSamples := metrics.GetBufferedSamples(samples)
-					assertRequestMetricsEmitted(t, bufSamples, "GET", sr("HTTPBIN_URL/${}"), 200, "")
-					assertRequestMetricsEmitted(t, bufSamples, "GET", sr("HTTPBIN_IP_URL/"), 200, "")
-				})
-			})
-
-			t.Run("ObjectForm", func(t *testing.T) {
-				_, err := rt.RunString(sr(`
-			{
-				let reqs = [
-					{ method: "GET", url: "HTTPBIN_URL/" },
-					{ url: "HTTPBIN_IP_URL/", method: "GET"},
-				];
-				let res = http.batch(reqs);
-				for (var key in res) {
-					if (res[key].status != 200) { throw new Error("wrong status: " + key + ": " + res[key].status); }
-					if (res[key].url != reqs[key].url) { throw new Error("wrong url: " + key + ": " + res[key].url + " != " + reqs[key].url); }
-				}
-			}`))
-				assert.NoError(t, err)
-				bufSamples := metrics.GetBufferedSamples(samples)
-				assertRequestMetricsEmitted(t, bufSamples, "GET", sr("HTTPBIN_URL/"), 200, "")
-				assertRequestMetricsEmitted(t, bufSamples, "GET", sr("HTTPBIN_IP_URL/"), 200, "")
-			})
-
-			t.Run("ObjectKeys", func(t *testing.T) {
-				_, err := rt.RunString(sr(`
-				var reqs = {
-					shorthand: "HTTPBIN_URL/get?r=shorthand",
-					arr: ["GET", "HTTPBIN_URL/get?r=arr", null, {tags: {name: 'arr'}}],
-					obj1: { method: "GET", url: "HTTPBIN_URL/get?r=obj1" },
-					obj2: { url: "HTTPBIN_URL/get?r=obj2", params: {tags: {name: 'obj2'}}, method: "GET"},
-				};
-				var res = http.batch(reqs);
-				for (var key in res) {
-					if (res[key].status != 200) { throw new Error("wrong status: " + key + ": " + res[key].status); }
-					if (res[key].json().args.r != key) { throw new Error("wrong request id: " + key); }
-				}`))
-				assert.NoError(t, err)
-				bufSamples := metrics.GetBufferedSamples(samples)
-				assertRequestMetricsEmitted(t, bufSamples, "GET", sr("HTTPBIN_URL/get?r=shorthand"), 200, "")
-				assertRequestMetricsEmitted(t, bufSamples, "GET", "arr", 200, "")
-				assertRequestMetricsEmitted(t, bufSamples, "GET", sr("HTTPBIN_URL/get?r=obj1"), 200, "")
-				assertRequestMetricsEmitted(t, bufSamples, "GET", "obj2", 200, "")
-			})
-
-			t.Run("BodyAndParams", func(t *testing.T) {
-				testStr := "testbody"
-				rt.Set("someStrFile", testStr)
-				rt.Set("someBinFile", []byte(testStr))
-
-				_, err := rt.RunString(sr(`
-					var reqs = [
-						["POST", "HTTPBIN_URL/post", "testbody"],
-						["POST", "HTTPBIN_URL/post", someStrFile],
-						["POST", "HTTPBIN_URL/post", someBinFile],
-						{
-							method: "POST",
-							url: "HTTPBIN_URL/post",
-							test: "test1",
-							body: "testbody",
-						}, {
-							body: someBinFile,
-							url: "HTTPBIN_IP_URL/post",
-							params: { tags: { name: "myname" } },
-							method: "POST",
-						}, {
-							method: "POST",
-							url: "HTTPBIN_IP_URL/post",
-							body: {
-								hello: "world!",
-							},
-							params: {
-								tags: { name: "myname" },
-								headers: { "Content-Type": "application/x-www-form-urlencoded" },
-							},
-						},
-					];
-					var res = http.batch(reqs);
-					for (var key in res) {
-						if (res[key].status != 200) { throw new Error("wrong status: " + key + ": " + res[key].status); }
-						if (res[key].json().data != "testbody" && res[key].json().form.hello != "world!") { throw new Error("wrong response for " + key + ": " + res[key].body); }
-					}`))
-				assert.NoError(t, err)
-				bufSamples := metrics.GetBufferedSamples(samples)
-				assertRequestMetricsEmitted(t, bufSamples, "POST", sr("HTTPBIN_URL/post"), 200, "")
-				assertRequestMetricsEmitted(t, bufSamples, "POST", "myname", 200, "")
-			})
-		})
-		t.Run("POST", func(t *testing.T) {
-			_, err := rt.RunString(sr(`
-			var res = http.batch([ ["POST", "HTTPBIN_URL/post", { key: "value" }] ]);
-			for (var key in res) {
-				if (res[key].status != 200) { throw new Error("wrong status: " + key + ": " + res[key].status); }
-				if (res[key].json().form.key != "value") { throw new Error("wrong form: " + key + ": " + JSON.stringify(res[key].json().form)); }
-			}`))
-			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "POST", sr("HTTPBIN_URL/post"), 200, "")
-		})
-		t.Run("PUT", func(t *testing.T) {
-			_, err := rt.RunString(sr(`
-			var res = http.batch([ ["PUT", "HTTPBIN_URL/put", { key: "value" }] ]);
-			for (var key in res) {
-				if (res[key].status != 200) { throw new Error("wrong status: " + key + ": " + res[key].status); }
-				if (res[key].json().form.key != "value") { throw new Error("wrong form: " + key + ": " + JSON.stringify(res[key].json().form)); }
-			}`))
-			assert.NoError(t, err)
-			assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "PUT", sr("HTTPBIN_URL/put"), 200, "")
-		})
-	})
-
 	t.Run("HTTPRequest", func(t *testing.T) {
 		t.Run("EmptyBody", func(t *testing.T) {
 			_, err := rt.RunString(sr(`
@@ -1605,7 +1294,11 @@ func TestRequestAndBatch(t *testing.T) {
 
 func TestRequestCancellation(t *testing.T) {
 	t.Parallel()
-	tb, state, _, rt, mi := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	rt := ts.runtime.VU.Runtime()
+	state := ts.runtime.VU.State()
+	mi := ts.instance
 	sr := tb.Replacer.Replace
 
 	hook := logtest.NewLocal(state.Logger)
@@ -1625,7 +1318,9 @@ func TestRequestCancellation(t *testing.T) {
 
 func TestRequestArrayBufferBody(t *testing.T) {
 	t.Parallel()
-	tb, _, _, rt, _ := newRuntime(t) //nolint:dogsled
+	ts := newTestCase(t)
+	tb := ts.tb
+	rt := ts.runtime.VU.Runtime()
 	sr := tb.Replacer.Replace
 
 	tb.Mux.HandleFunc("/post-arraybuffer", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1674,7 +1369,10 @@ func TestRequestArrayBufferBody(t *testing.T) {
 
 func TestRequestCompression(t *testing.T) {
 	t.Parallel()
-	tb, state, _, rt, _ := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	rt := ts.runtime.VU.Runtime()
+	state := ts.runtime.VU.State()
 
 	logHook := testutils.SimpleLogrusHook{HookedLevels: []logrus.Level{logrus.WarnLevel}}
 	state.Logger.AddHook(&logHook)
@@ -1861,7 +1559,10 @@ func TestRequestCompression(t *testing.T) {
 
 func TestResponseTypes(t *testing.T) {
 	t.Parallel()
-	tb, state, _, rt, _ := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	rt := ts.runtime.VU.Runtime()
+	state := ts.runtime.VU.State()
 
 	// We don't expect any failed requests
 	state.Options.Throw = null.BoolFrom(true)
@@ -2009,7 +1710,12 @@ func checkErrorCode(t testing.TB, sample metrics.Sample, code int, msg string) {
 
 func TestErrorCodes(t *testing.T) {
 	t.Parallel()
-	tb, state, samples, rt, _ := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	samples := ts.samples
+	rt := ts.runtime.VU.Runtime()
+	state := ts.runtime.VU.State()
+
 	state.Options.Throw = null.BoolFrom(false)
 	sr := tb.Replacer.Replace
 
@@ -2113,7 +1819,10 @@ func TestErrorCodes(t *testing.T) {
 
 func TestResponseWaitingAndReceivingTimings(t *testing.T) {
 	t.Parallel()
-	tb, state, _, rt, _ := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	rt := ts.runtime.VU.Runtime()
+	state := ts.runtime.VU.State()
 
 	// We don't expect any failed requests
 	state.Options.Throw = null.BoolFrom(true)
@@ -2155,7 +1864,10 @@ func TestResponseWaitingAndReceivingTimings(t *testing.T) {
 
 func TestResponseTimingsWhenTimeout(t *testing.T) {
 	t.Parallel()
-	tb, state, _, rt, _ := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	rt := ts.runtime.VU.Runtime()
+	state := ts.runtime.VU.State()
 
 	// We expect a failed request
 	state.Options.Throw = null.BoolFrom(false)
@@ -2176,7 +1888,10 @@ func TestResponseTimingsWhenTimeout(t *testing.T) {
 
 func TestNoResponseBodyMangling(t *testing.T) {
 	t.Parallel()
-	tb, state, _, rt, _ := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	rt := ts.runtime.VU.Runtime()
+	state := ts.runtime.VU.State()
 
 	// We don't expect any failed requests
 	state.Options.Throw = null.BoolFrom(true)
@@ -2203,7 +1918,10 @@ func TestNoResponseBodyMangling(t *testing.T) {
 }
 
 func TestRedirectMetricTags(t *testing.T) {
-	tb, _, samples, rt, _ := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	samples := ts.samples
+	rt := ts.runtime.VU.Runtime()
 
 	tb.Mux.HandleFunc("/redirect/post", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/get", http.StatusMovedPermanently)
@@ -2249,7 +1967,11 @@ func TestRedirectMetricTags(t *testing.T) {
 }
 
 func BenchmarkHandlingOfResponseBodies(b *testing.B) {
-	tb, state, samples, rt, _ := newRuntime(b)
+	ts := newTestCase(b)
+	tb := ts.tb
+	samples := ts.samples
+	rt := ts.runtime.VU.Runtime()
+	state := ts.runtime.VU.State()
 
 	state.BPool = bpool.NewBufferPool(100)
 
@@ -2318,7 +2040,10 @@ func BenchmarkHandlingOfResponseBodies(b *testing.B) {
 
 func TestErrorsWithDecompression(t *testing.T) {
 	t.Parallel()
-	tb, state, _, rt, _ := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	rt := ts.runtime.VU.Runtime()
+	state := ts.runtime.VU.State()
 
 	state.Options.Throw = null.BoolFrom(false)
 
@@ -2346,7 +2071,10 @@ func TestRequestAndBatchTLS(t *testing.T) {
 
 	t.Run("cert_expired", func(t *testing.T) {
 		t.Parallel()
-		_, state, _, rt, _ := newRuntime(t)
+		ts := newTestCase(t)
+		rt := ts.runtime.VU.Runtime()
+		state := ts.runtime.VU.State()
+
 		cert, key := GenerateTLSCertificate(t, "expired.localhost", time.Now().Add(-time.Hour), 0)
 		s, client := GetTestServerWithCertificate(t, cert, key)
 		go func() {
@@ -2358,11 +2086,17 @@ func TestRequestAndBatchTLS(t *testing.T) {
 		host, port, err := net.SplitHostPort(s.Listener.Addr().String())
 		require.NoError(t, err)
 		ip := net.ParseIP(host)
-		mybadsslHostname, err := lib.NewHostAddress(ip, port)
+		mybadsslHostname, err := types.NewHost(ip, port)
 		require.NoError(t, err)
 		state.Transport = client.Transport
 		state.TLSConfig = s.TLS
-		state.Dialer = &netext.Dialer{Hosts: map[string]*lib.HostAddress{"expired.localhost": mybadsslHostname}}
+		state.Dialer = &netext.Dialer{
+			Hosts: func() *types.Hosts {
+				hosts, er := types.NewHosts(map[string]types.Host{"expired.localhost": *mybadsslHostname})
+				require.NoError(t, er)
+				return hosts
+			}(),
+		}
 		client.Transport.(*http.Transport).DialContext = state.Dialer.DialContext //nolint:forcetypeassert
 		_, err = rt.RunString(`throw JSON.stringify(http.get("https://expired.localhost/"));`)
 		require.Error(t, err)
@@ -2379,7 +2113,11 @@ func TestRequestAndBatchTLS(t *testing.T) {
 		versionTest := versionTest
 		t.Run(versionTest.Name, func(t *testing.T) {
 			t.Parallel()
-			_, state, samples, rt, _ := newRuntime(t)
+			ts := newTestCase(t)
+			samples := ts.samples
+			rt := ts.runtime.VU.Runtime()
+			state := ts.runtime.VU.State()
+
 			cert, key := GenerateTLSCertificate(t, versionTest.URL, time.Now(), time.Hour)
 			s, client := GetTestServerWithCertificate(t, cert, key)
 
@@ -2402,11 +2140,13 @@ func TestRequestAndBatchTLS(t *testing.T) {
 			host, port, err := net.SplitHostPort(s.Listener.Addr().String())
 			require.NoError(t, err)
 			ip := net.ParseIP(host)
-			mybadsslHostname, err := lib.NewHostAddress(ip, port)
+			mybadsslHostname, err := types.NewHost(ip, port)
 			require.NoError(t, err)
-			state.Dialer = &netext.Dialer{Hosts: map[string]*lib.HostAddress{
-				versionTest.URL: mybadsslHostname,
-			}}
+			hosts, err := types.NewHosts(map[string]types.Host{
+				versionTest.URL: *mybadsslHostname,
+			})
+			require.NoError(t, err)
+			state.Dialer = &netext.Dialer{Hosts: hosts}
 			state.Transport = client.Transport
 			state.TLSConfig = s.TLS
 			client.Transport.(*http.Transport).DialContext = state.Dialer.DialContext //nolint:forcetypeassert
@@ -2430,7 +2170,10 @@ func TestRequestAndBatchTLS(t *testing.T) {
 		cipherSuiteTest := cipherSuiteTest
 		t.Run(cipherSuiteTest.Name, func(t *testing.T) {
 			t.Parallel()
-			_, state, samples, rt, _ := newRuntime(t)
+			ts := newTestCase(t)
+			samples := ts.samples
+			rt := ts.runtime.VU.Runtime()
+			state := ts.runtime.VU.State()
 			cert, key := GenerateTLSCertificate(t, cipherSuiteTest.URL, time.Now(), time.Hour)
 			s, client := GetTestServerWithCertificate(t, cert, key, cipherSuiteTest.suite)
 			go func() {
@@ -2442,11 +2185,13 @@ func TestRequestAndBatchTLS(t *testing.T) {
 			host, port, err := net.SplitHostPort(s.Listener.Addr().String())
 			require.NoError(t, err)
 			ip := net.ParseIP(host)
-			mybadsslHostname, err := lib.NewHostAddress(ip, port)
+			mybadsslHostname, err := types.NewHost(ip, port)
 			require.NoError(t, err)
-			state.Dialer = &netext.Dialer{Hosts: map[string]*lib.HostAddress{
-				cipherSuiteTest.URL: mybadsslHostname,
-			}}
+			hosts, err := types.NewHosts(map[string]types.Host{
+				cipherSuiteTest.URL: *mybadsslHostname,
+			})
+			require.NoError(t, err)
+			state.Dialer = &netext.Dialer{Hosts: hosts}
 			state.Transport = client.Transport
 			state.TLSConfig = s.TLS
 			client.Transport.(*http.Transport).DialContext = state.Dialer.DialContext //nolint:forcetypeassert
@@ -2465,7 +2210,11 @@ func TestRequestAndBatchTLS(t *testing.T) {
 			t.Skip("this doesn't work on windows for some reason")
 		}
 		website := "https://www.wikipedia.org/"
-		tb, state, samples, rt, _ := newRuntime(t)
+		ts := newTestCase(t)
+		tb := ts.tb
+		samples := ts.samples
+		rt := ts.runtime.VU.Runtime()
+		state := ts.runtime.VU.State()
 		state.Dialer = tb.Dialer
 		_, err := rt.RunString(fmt.Sprintf(`
 			var res = http.request("GET", "%s");
@@ -2478,7 +2227,11 @@ func TestRequestAndBatchTLS(t *testing.T) {
 
 func TestDigestAuthWithBody(t *testing.T) {
 	t.Parallel()
-	tb, state, samples, rt, _ := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	samples := ts.samples
+	rt := ts.runtime.VU.Runtime()
+	state := ts.runtime.VU.State()
 
 	state.Options.Throw = null.BoolFrom(true)
 	state.Options.HTTPDebug = null.StringFrom("full")
@@ -2512,7 +2265,9 @@ func TestDigestAuthWithBody(t *testing.T) {
 
 func TestBinaryResponseWithStatus0(t *testing.T) {
 	t.Parallel()
-	_, state, _, rt, _ := newRuntime(t) //nolint:dogsled
+	ts := newTestCase(t)
+	rt := ts.runtime.VU.Runtime()
+	state := ts.runtime.VU.State()
 	state.Options.Throw = null.BoolFrom(false)
 	_, err := rt.RunString(`
 		var res = http.get("https://asdajkdahdqiuwhejkasdnakjdnadasdlkas.com", { responseType: "binary" });

@@ -21,7 +21,6 @@ import (
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/consts"
 	"go.k6.io/k6/lib/netext"
-	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/lib/types"
 	"go.k6.io/k6/metrics"
 )
@@ -38,7 +37,6 @@ func TestInitContextRequire(t *testing.T) {
 
 		t.Run("k6", func(t *testing.T) {
 			t.Parallel()
-			logger := testutils.NewLogger(t)
 			b, err := getSimpleBundle(t, "/script.js", `
 					import k6 from "k6";
 					export let _k6 = k6;
@@ -47,7 +45,7 @@ func TestInitContextRequire(t *testing.T) {
 			`)
 			require.NoError(t, err, "bundle error")
 
-			bi, err := b.Instantiate(logger, 0)
+			bi, err := b.Instantiate(context.Background(), 0)
 			assert.NoError(t, err, "instance error")
 
 			exports := bi.pgm.exports
@@ -63,7 +61,6 @@ func TestInitContextRequire(t *testing.T) {
 		})
 
 		t.Run("group", func(t *testing.T) {
-			logger := testutils.NewLogger(t)
 			t.Parallel()
 			b, err := getSimpleBundle(t, "/script.js", `
 						import { group } from "k6";
@@ -73,7 +70,7 @@ func TestInitContextRequire(t *testing.T) {
 				`)
 			require.NoError(t, err)
 
-			bi, err := b.Instantiate(logger, 0)
+			bi, err := b.Instantiate(context.Background(), 0)
 			require.NoError(t, err)
 
 			exports := bi.pgm.exports
@@ -110,7 +107,7 @@ func TestInitContextRequire(t *testing.T) {
 			require.NoError(t, afero.WriteFile(fs, "/file.js", []byte(`throw new Error("aaaa")`), 0o755))
 			_, err := getSimpleBundle(t, "/script.js", `import "/file.js"; export default function() {}`, fs)
 			assert.EqualError(t, err,
-				"Error: aaaa\n\tat file:///file.js:2:7(3)\n\tat go.k6.io/k6/js.(*InitContext).Require-fm (native)\n\tat file:///script.js:1:0(14)\n\tat native\n")
+				"Error: aaaa\n\tat file:///file.js:2:7(3)\n\tat go.k6.io/k6/js.(*InitContext).Require-fm (native)\n\tat file:///script.js:1:0(15)\n")
 		})
 
 		imports := map[string]struct {
@@ -155,7 +152,6 @@ func TestInitContextRequire(t *testing.T) {
 					t.Run(name, func(t *testing.T) {
 						t.Parallel()
 						fs := afero.NewMemMapFs()
-						logger := testutils.NewLogger(t)
 
 						jsLib := `export default function() { return 12345; }`
 						if constName != "" {
@@ -183,7 +179,7 @@ func TestInitContextRequire(t *testing.T) {
 							assert.Contains(t, b.BaseInitContext.programs, "file://"+constPath)
 						}
 
-						_, err = b.Instantiate(logger, 0)
+						_, err = b.Instantiate(context.Background(), 0)
 						require.NoError(t, err)
 					})
 				}
@@ -192,7 +188,6 @@ func TestInitContextRequire(t *testing.T) {
 
 		t.Run("Isolation", func(t *testing.T) {
 			t.Parallel()
-			logger := testutils.NewLogger(t)
 			fs := afero.NewMemMapFs()
 			require.NoError(t, afero.WriteFile(fs, "/a.js", []byte(`const myvar = "a";`), 0o644))
 			require.NoError(t, afero.WriteFile(fs, "/b.js", []byte(`const myvar = "b";`), 0o644))
@@ -207,9 +202,9 @@ func TestInitContextRequire(t *testing.T) {
 			b, err := getSimpleBundle(t, "/script.js", data, fs)
 			require.NoError(t, err)
 
-			bi, err := b.Instantiate(logger, 0)
+			bi, err := b.Instantiate(context.Background(), 0)
 			require.NoError(t, err)
-			_, err = bi.exports[consts.DefaultFn](goja.Undefined())
+			_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 			assert.NoError(t, err)
 		})
 	})
@@ -236,7 +231,7 @@ func createAndReadFile(t *testing.T, file string, content []byte, expectedLength
 		return nil, err
 	}
 
-	bi, err := b.Instantiate(testutils.NewLogger(t), 0)
+	bi, err := b.Instantiate(context.Background(), 0)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +257,7 @@ func TestInitContextOpen(t *testing.T) {
 			t.Parallel()
 			bi, err := createAndReadFile(t, tc.file, tc.content, tc.length, "")
 			require.NoError(t, err)
-			assert.Equal(t, string(tc.content), bi.pgm.exports.Get("data").Export())
+			assert.Equal(t, string(tc.content), bi.getExported("data").Export())
 		})
 	}
 
@@ -271,7 +266,7 @@ func TestInitContextOpen(t *testing.T) {
 		bi, err := createAndReadFile(t, "/path/to/file.bin", []byte("hi!\x0f\xff\x01"), 6, "b")
 		require.NoError(t, err)
 		buf := bi.Runtime.NewArrayBuffer([]byte{104, 105, 33, 15, 255, 1})
-		assert.Equal(t, buf, bi.pgm.exports.Get("data").Export())
+		assert.Equal(t, buf, bi.getExported("data").Export())
 	})
 
 	testdata := map[string]string{
@@ -352,7 +347,7 @@ func TestRequestWithBinaryFile(t *testing.T) {
 			`, srv.URL), fs)
 	require.NoError(t, err)
 
-	bi, err := b.Instantiate(testutils.NewLogger(t), 0)
+	bi, err := b.Instantiate(context.Background(), 0)
 	require.NoError(t, err)
 
 	root, err := lib.NewGroup("", nil)
@@ -388,7 +383,7 @@ func TestRequestWithBinaryFile(t *testing.T) {
 	defer cancel()
 	bi.moduleVUImpl.ctx = ctx
 
-	v, err := bi.exports[consts.DefaultFn](goja.Undefined())
+	v, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 	require.NoError(t, err)
 	require.NotNil(t, v)
 	assert.Equal(t, true, v.Export())
@@ -499,7 +494,7 @@ func TestRequestWithMultipleBinaryFiles(t *testing.T) {
 			`, srv.URL), fs)
 	require.NoError(t, err)
 
-	bi, err := b.Instantiate(testutils.NewLogger(t), 0)
+	bi, err := b.Instantiate(context.Background(), 0)
 	require.NoError(t, err)
 
 	root, err := lib.NewGroup("", nil)
@@ -535,7 +530,7 @@ func TestRequestWithMultipleBinaryFiles(t *testing.T) {
 	defer cancel()
 	bi.moduleVUImpl.ctx = ctx
 
-	v, err := bi.exports[consts.DefaultFn](goja.Undefined())
+	v, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 	require.NoError(t, err)
 	require.NotNil(t, v)
 	assert.Equal(t, true, v.Export())
@@ -550,16 +545,15 @@ func TestInitContextVU(t *testing.T) {
 		export default function() { return vu; }
 	`)
 	require.NoError(t, err)
-	bi, err := b.Instantiate(testutils.NewLogger(t), 5)
+	bi, err := b.Instantiate(context.Background(), 5)
 	require.NoError(t, err)
-	v, err := bi.exports[consts.DefaultFn](goja.Undefined())
+	v, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 	require.NoError(t, err)
 	assert.Equal(t, int64(5), v.Export())
 }
 
 func TestSourceMaps(t *testing.T) {
 	t.Parallel()
-	logger := testutils.NewLogger(t)
 	fs := afero.NewMemMapFs()
 	require.NoError(t, afero.WriteFile(fs, "/module1.js", []byte(`
 export function f2(){
@@ -583,18 +577,17 @@ export default function(){
 	b, err := getSimpleBundle(t, "/script.js", data, fs)
 	require.NoError(t, err)
 
-	bi, err := b.Instantiate(logger, 0)
+	bi, err := b.Instantiate(context.Background(), 0)
 	require.NoError(t, err)
-	_, err = bi.exports[consts.DefaultFn](goja.Undefined())
+	_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 	require.Error(t, err)
 	exception := new(goja.Exception)
 	require.ErrorAs(t, err, &exception)
-	require.Equal(t, exception.String(), "exception in line 2\n\tat f2 (file:///module1.js:2:4(2))\n\tat file:///script.js:5:4(3)\n\tat native\n")
+	require.Equal(t, exception.String(), "exception in line 2\n\tat f2 (file:///module1.js:2:4(2))\n\tat file:///script.js:5:4(3)\n")
 }
 
 func TestSourceMapsExternal(t *testing.T) {
 	t.Parallel()
-	logger := testutils.NewLogger(t)
 	fs := afero.NewMemMapFs()
 	// This example is created through the template-typescript
 	require.NoError(t, afero.WriteFile(fs, "/test1.js", []byte(`
@@ -614,18 +607,17 @@ export default function () {
 	b, err := getSimpleBundle(t, "/script.js", data, fs)
 	require.NoError(t, err)
 
-	bi, err := b.Instantiate(logger, 0)
+	bi, err := b.Instantiate(context.Background(), 0)
 	require.NoError(t, err)
-	_, err = bi.exports[consts.DefaultFn](goja.Undefined())
+	_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 	require.Error(t, err)
 	exception := new(goja.Exception)
 	require.ErrorAs(t, err, &exception)
-	require.Equal(t, "cool is cool\n\tat webpack:///./test1.ts:2:4(2)\n\tat webpack:///./test1.ts:5:4(3)\n\tat file:///script.js:4:2(4)\n\tat native\n", exception.String())
+	require.Equal(t, "cool is cool\n\tat webpack:///./test1.ts:2:4(2)\n\tat webpack:///./test1.ts:5:4(3)\n\tat file:///script.js:4:2(4)\n", exception.String())
 }
 
 func TestSourceMapsExternalExtented(t *testing.T) {
 	t.Parallel()
-	logger := testutils.NewLogger(t)
 	fs := afero.NewMemMapFs()
 	// This example is created through the template-typescript
 	// but was exported to use import/export syntax so it has to go through babel
@@ -646,20 +638,19 @@ export default function () {
 	b, err := getSimpleBundle(t, "/script.js", data, fs)
 	require.NoError(t, err)
 
-	bi, err := b.Instantiate(logger, 0)
+	bi, err := b.Instantiate(context.Background(), 0)
 	require.NoError(t, err)
-	_, err = bi.exports[consts.DefaultFn](goja.Undefined())
+	_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 	require.Error(t, err)
 	exception := new(goja.Exception)
 	require.ErrorAs(t, err, &exception)
 	// TODO figure out why those are not the same as the one in the previous test TestSourceMapsExternal
 	// likely settings in the transpilers
-	require.Equal(t, "cool is cool\n\tat webpack:///./test1.ts:2:4(2)\n\tat r (webpack:///./test1.ts:5:4(3))\n\tat file:///script.js:4:2(4)\n\tat native\n", exception.String())
+	require.Equal(t, "cool is cool\n\tat webpack:///./test1.ts:2:4(2)\n\tat r (webpack:///./test1.ts:5:4(3))\n\tat file:///script.js:4:2(4)\n", exception.String())
 }
 
 func TestSourceMapsExternalExtentedInlined(t *testing.T) {
 	t.Parallel()
-	logger := testutils.NewLogger(t)
 	fs := afero.NewMemMapFs()
 	// This example is created through the template-typescript
 	// but was exported to use import/export syntax so it has to go through babel
@@ -677,13 +668,66 @@ export default function () {
 	b, err := getSimpleBundle(t, "/script.js", data, fs)
 	require.NoError(t, err)
 
-	bi, err := b.Instantiate(logger, 0)
+	bi, err := b.Instantiate(context.Background(), 0)
 	require.NoError(t, err)
-	_, err = bi.exports[consts.DefaultFn](goja.Undefined())
+	_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 	require.Error(t, err)
 	exception := new(goja.Exception)
 	require.ErrorAs(t, err, &exception)
 	// TODO figure out why those are not the same as the one in the previous test TestSourceMapsExternal
 	// likely settings in the transpilers
-	require.Equal(t, "cool is cool\n\tat webpack:///./test1.ts:2:4(2)\n\tat r (webpack:///./test1.ts:5:4(3))\n\tat file:///script.js:4:2(4)\n\tat native\n", exception.String())
+	require.Equal(t, "cool is cool\n\tat webpack:///./test1.ts:2:4(2)\n\tat r (webpack:///./test1.ts:5:4(3))\n\tat file:///script.js:4:2(4)\n", exception.String())
+}
+
+func TestImportModificationsAreConsistentBetweenFiles(t *testing.T) {
+	t.Parallel()
+	fs := afero.NewMemMapFs()
+	require.NoError(t, afero.WriteFile(fs, "/notk6.js", []byte(`export default {group}; function group() {}`), 0o644))
+	require.NoError(t, afero.WriteFile(fs, "/instrument.js", []byte(`
+    import k6 from "k6";
+    k6.newKey = 5;
+    k6.group = 3;
+
+    import notk6 from "./notk6.js";
+    notk6.group = 3;
+    notk6.newKey = 5;
+    `), 0o644))
+
+	b, err := getSimpleBundle(t, "/script.js", `
+    import k6 from "k6";
+    import notk6 from "./notk6.js";
+    import "./instrument.js";
+    if (k6.newKey != 5) { throw "k6.newKey is wrong "+ k6.newKey}
+    if (k6.group != 3) { throw "k6.group is wrong "+ k6.group}
+    if (notk6.newKey != 5) { throw "notk6.newKey is wrong "+ notk6.newKey}
+    if (notk6.group != 3) { throw "notk6.group is wrong "+ notk6.group}
+    export default () => { throw "this shouldn't be ran" }
+`, fs)
+	require.NoError(t, err, "bundle error")
+
+	_, err = b.Instantiate(context.Background(), 0)
+	require.NoError(t, err)
+}
+
+func TestCacheAbsolutePathsNotRelative(t *testing.T) {
+	t.Parallel()
+	fs := afero.NewMemMapFs()
+	require.NoError(t, afero.WriteFile(fs, "/a/interesting.js", []byte(`export default "a.interesting"`), 0o644))
+	require.NoError(t, afero.WriteFile(fs, "/a/import.js", []byte(`export { default as default} from "./interesting.js"`), 0o644))
+
+	require.NoError(t, afero.WriteFile(fs, "/b/interesting.js", []byte(`export default "b.interesting"`), 0o644))
+	require.NoError(t, afero.WriteFile(fs, "/b/import.js", []byte(`export { default as default} from "./interesting.js"`), 0o644))
+
+	b, err := getSimpleBundle(t, "/script.js", `
+    import a from "/a/import.js"
+    import b from "/b/import.js"
+    if (a != "a.interesting") { throw `+"`"+`'a' has wrong value "${a}" should be "a.interesting"`+"`"+`}
+
+    if (b != "b.interesting") { throw `+"`"+`'b' has wrong value "${b}" should be "b.interesting"`+"`"+`}
+    export default () => { throw "this shouldn't be ran" }
+`, fs)
+	require.NoError(t, err, "bundle error")
+
+	_, err = b.Instantiate(context.Background(), 0)
+	require.NoError(t, err)
 }

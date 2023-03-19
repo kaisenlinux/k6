@@ -14,6 +14,8 @@ import (
 	"gopkg.in/guregu/null.v3"
 
 	"go.k6.io/k6/cloudapi"
+	"go.k6.io/k6/errext"
+	"go.k6.io/k6/errext/exitcodes"
 	"go.k6.io/k6/output"
 
 	"go.k6.io/k6/lib"
@@ -35,8 +37,6 @@ type Output struct {
 	duration      int64 // in seconds
 	thresholds    map[string][]*metrics.Threshold
 	client        *MetricsClient
-
-	runStatus lib.RunStatus
 
 	bufferMutex      sync.Mutex
 	bufferHTTPTrails []*httpext.Trail
@@ -60,12 +60,12 @@ type Output struct {
 	aggregationDone    *sync.WaitGroup
 	stopOutput         chan struct{}
 	outputDone         *sync.WaitGroup
-	engineStopFunc     func(error)
+	testStopFunc       func(error)
 }
 
 // Verify that Output implements the wanted interfaces
 var _ interface {
-	output.WithRunStatusUpdates
+	output.WithStopWithTestError
 	output.WithThresholds
 	output.WithTestRunStop
 } = &Output{}
@@ -259,9 +259,18 @@ func (out *Output) startBackgroundProcesses() {
 	}()
 }
 
-// Stop gracefully stops all metric emission from the output and when all metric
-// samples are emitted, it sends an API to the cloud to finish the test run.
+// Stop gracefully stops all metric emission from the output: when all metric
+// samples are emitted, it makes a cloud API call to finish the test run.
+//
+// Deprecated: use StopWithTestError() instead.
 func (out *Output) Stop() error {
+	return out.StopWithTestError(nil)
+}
+
+// StopWithTestError gracefully stops all metric emission from the output: when
+// all metric samples are emitted, it makes a cloud API call to finish the test
+// run. If testErr was specified, it extracts the RunStatus from it.
+func (out *Output) StopWithTestError(testErr error) error {
 	out.logger.Debug("Stopping the cloud output...")
 	close(out.stopAggregation)
 	out.aggregationDone.Wait() // could be a no-op, if we have never started the aggregation
@@ -269,7 +278,7 @@ func (out *Output) Stop() error {
 	close(out.stopOutput)
 	out.outputDone.Wait()
 	out.logger.Debug("Metric emission stopped, calling cloud API...")
-	err := out.testFinished()
+	err := out.testFinished(testErr)
 	if err != nil {
 		out.logger.WithFields(logrus.Fields{"error": err}).Warn("Failed to send test finished to the cloud")
 	} else {
@@ -283,9 +292,53 @@ func (out *Output) Description() string {
 	return fmt.Sprintf("cloud (%s)", cloudapi.URLForResults(out.referenceID, out.config))
 }
 
-// SetRunStatus receives the latest run status from the Engine.
-func (out *Output) SetRunStatus(status lib.RunStatus) {
-	out.runStatus = status
+// getRunStatus determines the run status of the test based on the error.
+func (out *Output) getRunStatus(testErr error) cloudapi.RunStatus {
+	if testErr == nil {
+		return cloudapi.RunStatusFinished
+	}
+
+	var err errext.HasAbortReason
+	if errors.As(testErr, &err) {
+		abortReason := err.AbortReason()
+		switch abortReason {
+		case errext.AbortedByUser:
+			return cloudapi.RunStatusAbortedUser
+		case errext.AbortedByThreshold:
+			return cloudapi.RunStatusAbortedThreshold
+		case errext.AbortedByScriptError:
+			return cloudapi.RunStatusAbortedScriptError
+		case errext.AbortedByScriptAbort:
+			return cloudapi.RunStatusAbortedUser // TODO: have a better value than this?
+		case errext.AbortedByTimeout:
+			return cloudapi.RunStatusAbortedLimit
+		case errext.AbortedByOutput:
+			return cloudapi.RunStatusAbortedSystem
+		case errext.AbortedByThresholdsAfterTestEnd:
+			// The test run finished normally, it wasn't prematurely aborted by
+			// anything while running, but the thresholds failed at the end and
+			// k6 will return an error and a non-zero exit code to the user.
+			//
+			// However, failures are tracked somewhat differently by the k6
+			// cloud compared to k6 OSS. It doesn't have a single pass/fail
+			// variable with multiple failure states, like k6's exit codes.
+			// Instead, it has two variables, result_status and run_status.
+			//
+			// The status of the thresholds is tracked by the binary
+			// result_status variable, which signifies whether the thresholds
+			// passed or failed (failure also called "tainted" in some places of
+			// the API here). The run_status signifies whether the test run
+			// finished normally and has a few fixed failures values.
+			//
+			// So, this specific k6 error will be communicated to the cloud only
+			// via result_status, while the run_status will appear normal.
+			return cloudapi.RunStatusFinished
+		}
+	}
+
+	// By default, the catch-all error is "aborted by system", but let's log that
+	out.logger.WithError(testErr).Debug("unknown test error classified as 'aborted by system'")
+	return cloudapi.RunStatusAbortedSystem
 }
 
 // SetThresholds receives the thresholds before the output is Start()-ed.
@@ -299,7 +352,7 @@ func (out *Output) SetThresholds(scriptThresholds map[string]metrics.Thresholds)
 
 // SetTestRunStopCallback receives the function that stops the engine on error
 func (out *Output) SetTestRunStopCallback(stopFunc func(error)) {
-	out.engineStopFunc = stopFunc
+	out.testStopFunc = stopFunc
 }
 
 // AddMetricSamples receives a set of metric samples. This method is never
@@ -602,8 +655,12 @@ func (out *Output) pushMetrics() {
 		if err != nil {
 			if out.shouldStopSendingMetrics(err) {
 				out.logger.WithError(err).Warn("Stopped sending metrics to cloud due to an error")
+				serr := errext.WithAbortReasonIfNone(
+					errext.WithExitCodeIfNone(err, exitcodes.ExternalAbort),
+					errext.AbortedByOutput,
+				)
 				if out.config.StopOnError.Bool {
-					out.engineStopFunc(err)
+					out.testStopFunc(serr)
 				}
 				close(out.stopSendingMetrics)
 				break
@@ -617,7 +674,7 @@ func (out *Output) pushMetrics() {
 	}).Debug("Pushing metrics to cloud finished")
 }
 
-func (out *Output) testFinished() error {
+func (out *Output) testFinished(testErr error) error {
 	if out.referenceID == "" || out.config.PushRefID.Valid {
 		return nil
 	}
@@ -634,15 +691,12 @@ func (out *Output) testFinished() error {
 		}
 	}
 
+	runStatus := out.getRunStatus(testErr)
 	out.logger.WithFields(logrus.Fields{
-		"ref":     out.referenceID,
-		"tainted": testTainted,
+		"ref":        out.referenceID,
+		"tainted":    testTainted,
+		"run_status": runStatus,
 	}).Debug("Sending test finished")
-
-	runStatus := lib.RunStatusFinished
-	if out.runStatus != lib.RunStatusQueued {
-		runStatus = out.runStatus
-	}
 
 	return out.client.TestFinished(out.referenceID, thresholdResults, testTainted, runStatus)
 }

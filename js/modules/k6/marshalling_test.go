@@ -113,7 +113,7 @@ func TestSetupDataMarshalling(t *testing.T) {
 
 	err = runner.SetOptions(lib.Options{
 		SetupTimeout: types.NullDurationFrom(5 * time.Second),
-		Hosts:        tb.Dialer.Hosts,
+		Hosts:        types.NullHosts{Trie: tb.Dialer.Hosts},
 	})
 	require.NoError(t, err)
 
@@ -122,10 +122,8 @@ func TestSetupDataMarshalling(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	require.NoError(t, runner.Setup(ctx, samples))
-	initVU, err := runner.NewVU(1, 1, samples)
-	if assert.NoError(t, err) {
-		vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
-		err := vu.RunOnce()
-		assert.NoError(t, err)
-	}
+	initVU, err := runner.NewVU(ctx, 1, 1, samples)
+	require.NoError(t, err)
+	vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
+	assert.NoError(t, vu.RunOnce())
 }

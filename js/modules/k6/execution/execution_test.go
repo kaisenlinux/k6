@@ -292,12 +292,16 @@ func TestOptionsTestFull(t *testing.T) {
 					require.NoError(t, err)
 					return bh
 				}(),
-				Hosts: map[string]*lib.HostAddress{
-					"test.k6.io": {
-						IP:   []byte{0x01, 0x02, 0x03, 0x04},
-						Port: 8443,
-					},
-				},
+				Hosts: func() types.NullHosts {
+					hs, err := types.NewNullHosts(map[string]types.Host{
+						"test.k6.io": {
+							IP:   []byte{0x01, 0x02, 0x03, 0x04},
+							Port: 8443,
+						},
+					})
+					require.NoError(t, err)
+					return hs
+				}(),
 				External: map[string]json.RawMessage{
 					"ext-one": json.RawMessage(`{"rawkey":"rawvalue"}`),
 				},
@@ -399,6 +403,34 @@ func TestScenarioNoAvailableInInitContext(t *testing.T) {
 		_, err := rt.RunString(prop)
 		require.Error(t, err)
 		require.ErrorContains(t, err, "getting scenario information outside of the VU context is not supported")
+	}
+}
+
+func TestVUDefaultDetails(t *testing.T) {
+	t.Parallel()
+
+	rt := goja.New()
+	m, ok := New().NewModuleInstance(
+		&modulestest.VU{
+			RuntimeField: rt,
+			CtxField:     context.Background(),
+			StateField: &lib.State{
+				Options: lib.Options{
+					Paused: null.BoolFrom(true),
+				},
+			},
+		},
+	).(*ModuleInstance)
+	require.True(t, ok)
+	require.NoError(t, rt.Set("exec", m.Exports().Default))
+
+	props := []string{"idInInstance", "idInTest", "iterationInInstance", "iterationInScenario"}
+
+	for _, code := range props {
+		prop := fmt.Sprintf("exec.vu.%s", code)
+		res, err := rt.RunString(prop)
+		require.NoError(t, err)
+		require.Equal(t, "0", res.String())
 	}
 }
 

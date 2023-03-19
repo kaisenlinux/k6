@@ -1,4 +1,5 @@
 // Package exitcodes contains the constants representing possible k6 exit error codes.
+//
 //nolint:golint
 package exitcodes
 
@@ -13,7 +14,7 @@ const (
 	SetupTimeout             ExitCode = 100
 	TeardownTimeout          ExitCode = 101
 	GenericTimeout           ExitCode = 102 // TODO: remove?
-	GenericEngine            ExitCode = 103
+	ScriptStoppedFromRESTAPI ExitCode = 103
 	InvalidConfig            ExitCode = 104
 	ExternalAbort            ExitCode = 105
 	CannotStartRESTAPI       ExitCode = 106

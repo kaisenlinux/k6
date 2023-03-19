@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,23 +15,22 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v3"
 
-	"go.k6.io/k6/core"
-	"go.k6.io/k6/core/local"
+	"go.k6.io/k6/execution"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/testutils/minirunner"
+	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/metrics/engine"
+	"go.k6.io/k6/output"
 )
 
 func TestGetStatus(t *testing.T) {
 	t.Parallel()
 
 	testState := getTestRunState(t, lib.Options{}, &minirunner.MiniRunner{})
-	execScheduler, err := local.NewExecutionScheduler(testState)
-	require.NoError(t, err)
-	engine, err := core.NewEngine(testState, execScheduler, nil)
-	require.NoError(t, err)
+	cs := getControlSurface(t, testState)
 
 	rw := httptest.NewRecorder()
-	NewHandler().ServeHTTP(rw, newRequestWithEngine(engine, "GET", "/v1/status", nil))
+	NewHandler(cs).ServeHTTP(rw, httptest.NewRequest(http.MethodGet, "/v1/status", nil))
 	res := rw.Result()
 	assert.Equal(t, http.StatusOK, res.StatusCode)
 
@@ -100,6 +101,7 @@ func TestPatchStatus(t *testing.T) {
 	}
 
 	for name, testCase := range testData {
+		name, testCase := name, testCase
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
@@ -110,31 +112,53 @@ func TestPatchStatus(t *testing.T) {
 			require.NoError(t, err)
 
 			testState := getTestRunState(t, lib.Options{Scenarios: scenarios}, &minirunner.MiniRunner{})
-			execScheduler, err := local.NewExecutionScheduler(testState)
-			require.NoError(t, err)
-			engine, err := core.NewEngine(testState, execScheduler, nil)
+			execScheduler, err := execution.NewScheduler(testState)
 			require.NoError(t, err)
 
-			require.NoError(t, engine.OutputManager.StartOutputs())
-			defer engine.OutputManager.StopOutputs()
-
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			run, wait, err := engine.Init(ctx, ctx)
+			metricsEngine, err := engine.NewMetricsEngine(testState)
 			require.NoError(t, err)
 
+			globalCtx, globalCancel := context.WithCancel(context.Background())
+			defer globalCancel()
+			runCtx, runAbort := execution.NewTestRunContext(globalCtx, testState.Logger)
+			defer runAbort(fmt.Errorf("unexpected abort"))
+
+			outputManager := output.NewManager([]output.Output{metricsEngine.CreateIngester()}, testState.Logger, runAbort)
+			samples := make(chan metrics.SampleContainer, 1000)
+			waitMetricsFlushed, stopOutputs, err := outputManager.Start(samples)
+			require.NoError(t, err)
+			defer stopOutputs(nil)
+
+			cs := &ControlSurface{
+				RunCtx:        runCtx,
+				Samples:       samples,
+				MetricsEngine: metricsEngine,
+				Scheduler:     execScheduler,
+				RunState:      testState,
+			}
+
+			stopEmission, err := execScheduler.Init(runCtx, samples)
+			require.NoError(t, err)
+
+			wg := &sync.WaitGroup{}
+			wg.Add(1)
 			defer func() {
-				cancel()
-				wait()
+				runAbort(fmt.Errorf("custom cancel signal"))
+				waitMetricsFlushed()
+				wg.Wait()
 			}()
 
 			go func() {
-				assert.NoError(t, run())
+				assert.ErrorContains(t, execScheduler.Run(globalCtx, runCtx, samples), "custom cancel signal")
+				stopEmission()
+				close(samples)
+				wg.Done()
 			}()
 			// wait for the executor to initialize to avoid a potential data race below
 			time.Sleep(200 * time.Millisecond)
 
 			rw := httptest.NewRecorder()
-			NewHandler().ServeHTTP(rw, newRequestWithEngine(engine, "PATCH", "/v1/status", bytes.NewReader(testCase.Payload)))
+			NewHandler(cs).ServeHTTP(rw, httptest.NewRequest(http.MethodPatch, "/v1/status", bytes.NewReader(testCase.Payload)))
 			res := rw.Result()
 
 			require.Equal(t, "application/json; charset=utf-8", rw.Header().Get("Content-Type"))
@@ -145,7 +169,7 @@ func TestPatchStatus(t *testing.T) {
 				return
 			}
 
-			status := NewStatus(engine)
+			status := newStatus(cs)
 			if testCase.ExpectedStatus.Paused.Valid {
 				assert.Equal(t, testCase.ExpectedStatus.Paused, status.Paused)
 			}

@@ -48,17 +48,12 @@ var (
 		"BigInt",                      // not supported at all
 		"IsHTMLDDA",                   // not supported at all
 		"generators",                  // not supported in a meaningful way IMO
-		"Array.prototype.item",        // not even standard yet
 		"async-iteration",             // not supported at all
-		"TypedArray.prototype.item",   // not even standard yet
+		"top-level-await",             // not supported at all
 		"String.prototype.replaceAll", // not supported at all, Stage 4 since 2020
 
 		// from goja
 		"Symbol.asyncIterator",
-		"async-functions",
-		"class-static-block",
-		"class-fields-private",
-		"class-fields-private-in",
 		"regexp-named-groups",
 		"regexp-dotall",
 		"regexp-unicode-property-escapes",
@@ -70,32 +65,24 @@ var (
 		"import-assertions",
 		"dynamic-import",
 		"logical-assignment-operators",
-		"coalesce-expression",
 		"import.meta",
 		"Atomics",
 		"Atomics.waitAsync",
 		"FinalizationRegistry",
 		"WeakRef",
 		"numeric-separator-literal",
-		"Object.fromEntries",
-		"Object.hasOwn",
 		"__getter__",
 		"__setter__",
 		"ShadowRealm",
 		"SharedArrayBuffer",
 		"error-cause",
 		"resizable-arraybuffer", // stage 3 as of 2021 https://github.com/tc39/proposal-resizablearraybuffer
-		"hashbang",              // #comments in js - not implemented https://github.com/tc39/proposal-hashbang
 
-		"array-find-from-last",    // stage 3 as of 2021 https://github.com/tc39/proposal-array-find-from-last
-		"Array.prototype.at",      // stage 3 as of 2021 https://github.com/tc39/proposal-relative-indexing-method
-		"String.prototype.at",     // stage 3 as of 2021 https://github.com/tc39/proposal-relative-indexing-method
-		"TypedArray.prototype.at", // stage 3 as of 2021 https://github.com/tc39/proposal-relative-indexing-method
+		"array-find-from-last", // stage 3 as of 2021 https://github.com/tc39/proposal-array-find-from-last
 	}
-	skipWords = []string{"yield", "generator", "Generator", "async", "await"}
+	skipWords = []string{"yield", "generator", "Generator", "module"}
 	skipList  = map[string]bool{
-		"test/built-ins/Function/prototype/toString/AsyncFunction.js": true,
-		"test/built-ins/Object/seal/seal-generatorfunction.js":        true,
+		"test/built-ins/Object/seal/seal-generatorfunction.js": true,
 
 		"test/built-ins/Date/parse/without-utc-offset.js": true, // some other reason ?!? depending on local time
 
@@ -173,23 +160,31 @@ var (
 		"test/language/literals/string/legacy-", // legecy string escapes
 
 		// Async/Promise and other totally unsupported functionality
-		"test/built-ins/AsyncArrowFunction",
 		"test/built-ins/AsyncFromSyncIteratorPrototype",
-		"test/built-ins/AsyncFunction",
 		"test/built-ins/AsyncGeneratorFunction",
 		"test/built-ins/AsyncGeneratorPrototype",
 		"test/built-ins/AsyncIteratorPrototype",
 		"test/built-ins/Atomics",
 		"test/built-ins/BigInt",
 		"test/built-ins/SharedArrayBuffer",
-		"test/language/eval-code/direct/async",
-		"test/language/eval-code/direct/gen-",
-		"test/language/expressions/await",
-		"test/language/expressions/async",
 		"test/language/expressions/dynamic-import",
-		"test/language/expressions/object/dstr/async",
 		"test/language/module-code/top-level-await",
-		"test/language/statements/async-function",
+
+		// generator methods seem to just not work at all
+		"test/language/arguments-object/cls-decl-gen-met",
+		"test/language/arguments-object/cls-decl-private-gen-meth",
+		"test/language/arguments-object/cls-expr-gen-meth",
+		"test/language/arguments-object/cls-expr-private-gen-meth",
+		"test/language/eval-code/direct/gen-",
+		"test/language/eval-code/direct/async-gen-",
+		"test/language/expressions/class/gen-method",
+		"test/language/expressions/class/dstr/gen-meth",
+		"test/language/expressions/class/dstr/private-gen-meth",
+		"test/language/expressions/object/dstr/gen-meth",
+		"test/language/statements/class/gen-method",
+		"test/language/statements/class/dstr/gen-meth",
+		"test/language/statements/class/dstr/private-gen-meth",
+
 		"test/built-ins/Function/prototype/toString/async",
 		"test/built-ins/Function/prototype/toString/async",
 		"test/built-ins/Function/prototype/toString/generator",
@@ -380,7 +375,7 @@ func (ctx *tc39TestCtx) runTC39Test(t testing.TB, name, src string, meta *tc39Me
 	} else {
 		_ = vm.Set("print", t.Log)
 	}
-	early, origErr, err := ctx.runTC39Script(name, src, meta.Includes, vm)
+	early, origErr, err := ctx.runTC39Script(name, src, meta.Includes, vm, meta.Negative.Type != "")
 
 	if err == nil {
 		if meta.Negative.Type != "" {
@@ -515,6 +510,7 @@ func (ctx *tc39TestCtx) runTC39File(name string, t testing.TB) {
 		// t.Logf("Running strict test: %s", name)
 		ctx.runTC39Test(t, name, src, meta, true)
 	} else { // Run test in non strict mode only if we won't run them in strict
+		// NOTE: in practice k6 does not run non strict code at all so this tests make no sense
 		// TODO uncomment the if above and delete this else so we run both parts when the tests
 		// don't take forever
 		ctx.runTC39Test(t, name, src, meta, false)
@@ -589,7 +585,7 @@ func (ctx *tc39TestCtx) runFile(base, name string, vm *goja.Runtime) error {
 	return err
 }
 
-func (ctx *tc39TestCtx) runTC39Script(name, src string, includes []string, vm *goja.Runtime) (early bool, origErr, err error) {
+func (ctx *tc39TestCtx) runTC39Script(name, src string, includes []string, vm *goja.Runtime, expectsError bool) (early bool, origErr, err error) {
 	early = true
 	err = ctx.runFile(ctx.base, path.Join("harness", "assert.js"), vm)
 	if err != nil {
@@ -612,14 +608,13 @@ func (ctx *tc39TestCtx) runTC39Script(name, src string, includes []string, vm *g
 	comp := ctx.compilerPool.Get()
 	defer ctx.compilerPool.Put(comp)
 	comp.Options = compiler.Options{Strict: false, CompatibilityMode: lib.CompatibilityModeBase}
-	p, _, origErr = comp.Compile(src, name, true)
-	if origErr != nil {
+	p, _, err = comp.Compile(src, name, true)
+	origErr = err
+	if err != nil && !expectsError {
 		src, _, err = comp.Transform(src, name, nil)
 		if err == nil {
 			p, _, err = comp.Compile(src, name, true)
 		}
-	} else {
-		err = origErr
 	}
 
 	if err != nil {
@@ -629,7 +624,7 @@ func (ctx *tc39TestCtx) runTC39Script(name, src string, includes []string, vm *g
 	early = false
 	_, err = vm.RunProgram(p)
 
-	return
+	return early, origErr, err
 }
 
 func (ctx *tc39TestCtx) runTC39Tests(name string) {

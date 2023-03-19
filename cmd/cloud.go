@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"go.k6.io/k6/cloudapi"
+	"go.k6.io/k6/cmd/state"
 	"go.k6.io/k6/errext"
 	"go.k6.io/k6/errext/exitcodes"
 	"go.k6.io/k6/lib"
@@ -26,7 +27,7 @@ import (
 
 // cmdCloud handles the `k6 cloud` sub-command
 type cmdCloud struct {
-	gs *globalState
+	gs *state.GlobalState
 
 	showCloudLogs bool
 	exitOnRunning bool
@@ -38,7 +39,7 @@ func (c *cmdCloud) preRun(cmd *cobra.Command, args []string) error {
 	// We deliberately parse the env variables, to validate for wrong
 	// values, even if we don't subsequently use them (if the respective
 	// CLI flag was specified, since it has a higher priority).
-	if showCloudLogsEnv, ok := c.gs.envVars["K6_SHOW_CLOUD_LOGS"]; ok {
+	if showCloudLogsEnv, ok := c.gs.Env["K6_SHOW_CLOUD_LOGS"]; ok {
 		showCloudLogsValue, err := strconv.ParseBool(showCloudLogsEnv)
 		if err != nil {
 			return fmt.Errorf("parsing K6_SHOW_CLOUD_LOGS returned an error: %w", err)
@@ -48,7 +49,7 @@ func (c *cmdCloud) preRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if exitOnRunningEnv, ok := c.gs.envVars["K6_EXIT_ON_RUNNING"]; ok {
+	if exitOnRunningEnv, ok := c.gs.Env["K6_EXIT_ON_RUNNING"]; ok {
 		exitOnRunningValue, err := strconv.ParseBool(exitOnRunningEnv)
 		if err != nil {
 			return fmt.Errorf("parsing K6_EXIT_ON_RUNNING returned an error: %w", err)
@@ -62,6 +63,7 @@ func (c *cmdCloud) preRun(cmd *cobra.Command, args []string) error {
 }
 
 // TODO: split apart some more
+//
 //nolint:funlen,gocognit,cyclop
 func (c *cmdCloud) run(cmd *cobra.Command, args []string) error {
 	printBanner(c.gs)
@@ -112,7 +114,7 @@ func (c *cmdCloud) run(cmd *cobra.Command, args []string) error {
 
 	// Cloud config
 	cloudConfig, err := cloudapi.GetConsolidatedConfig(
-		test.derivedConfig.Collectors["cloud"], c.gs.envVars, "", arc.Options.External)
+		test.derivedConfig.Collectors["cloud"], c.gs.Env, "", arc.Options.External)
 	if err != nil {
 		return err
 	}
@@ -146,10 +148,10 @@ func (c *cmdCloud) run(cmd *cobra.Command, args []string) error {
 		name = filepath.Base(test.sourceRootPath)
 	}
 
-	globalCtx, globalCancel := context.WithCancel(c.gs.ctx)
+	globalCtx, globalCancel := context.WithCancel(c.gs.Ctx)
 	defer globalCancel()
 
-	logger := c.gs.logger
+	logger := c.gs.Logger
 
 	// Start cloud test run
 	modifyAndPrintBar(c.gs, progressBar, pb.WithConstProgress(0, "Validating script options"))
@@ -160,9 +162,13 @@ func (c *cmdCloud) run(cmd *cobra.Command, args []string) error {
 	}
 
 	modifyAndPrintBar(c.gs, progressBar, pb.WithConstProgress(0, "Uploading archive"))
-	refID, err := client.StartCloudTestRun(name, cloudConfig.ProjectID.Int64, arc)
+	cloudTestRun, err := client.StartCloudTestRun(name, cloudConfig.ProjectID.Int64, arc)
 	if err != nil {
 		return err
+	}
+	refID := cloudTestRun.ReferenceID
+	if cloudTestRun.ConfigOverride != nil {
+		cloudConfig = cloudConfig.Apply(*cloudTestRun.ConfigOverride)
 	}
 
 	// Trap Interrupts, SIGINTs and SIGTERMs.
@@ -230,9 +236,9 @@ func (c *cmdCloud) run(cmd *cobra.Command, args []string) error {
 
 			statusText := testProgress.RunStatusText
 
-			if testProgress.RunStatus == lib.RunStatusFinished {
+			if testProgress.RunStatus == cloudapi.RunStatusFinished {
 				testProgress.Progress = 1
-			} else if testProgress.RunStatus == lib.RunStatusRunning {
+			} else if testProgress.RunStatus == cloudapi.RunStatusRunning {
 				if startTime.IsZero() {
 					startTime = time.Now()
 				}
@@ -269,8 +275,8 @@ func (c *cmdCloud) run(cmd *cobra.Command, args []string) error {
 		testProgress = newTestProgress
 		testProgressLock.Unlock()
 
-		if (newTestProgress.RunStatus > lib.RunStatusRunning) ||
-			(c.exitOnRunning && newTestProgress.RunStatus == lib.RunStatusRunning) {
+		if (newTestProgress.RunStatus > cloudapi.RunStatusRunning) ||
+			(c.exitOnRunning && newTestProgress.RunStatus == cloudapi.RunStatusRunning) {
 			globalCancel()
 			break
 		}
@@ -281,8 +287,8 @@ func (c *cmdCloud) run(cmd *cobra.Command, args []string) error {
 		return errext.WithExitCodeIfNone(errors.New("Test progress error"), exitcodes.CloudFailedToGetProgress)
 	}
 
-	if !c.gs.flags.quiet {
-		valueColor := getColor(c.gs.flags.noColor || !c.gs.stdOut.isTTY, color.FgCyan)
+	if !c.gs.Flags.Quiet {
+		valueColor := getColor(c.gs.Flags.NoColor || !c.gs.Stdout.IsTTY, color.FgCyan)
 		printToStdout(c.gs, fmt.Sprintf(
 			"     test status: %s\n", valueColor.Sprint(testProgress.RunStatusText),
 		))
@@ -314,7 +320,7 @@ func (c *cmdCloud) flagSet() *pflag.FlagSet {
 	return flags
 }
 
-func getCmdCloud(gs *globalState) *cobra.Command {
+func getCmdCloud(gs *state.GlobalState) *cobra.Command {
 	c := &cmdCloud{
 		gs:            gs,
 		showCloudLogs: true,

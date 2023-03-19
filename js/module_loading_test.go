@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"go.k6.io/k6/lib/types"
+
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v3"
@@ -103,14 +105,14 @@ func TestLoadOnceGlobalVars(t *testing.T) {
 					t.Parallel()
 					ch := newDevNullSampleChannel()
 					defer close(ch)
-					initVU, err := r.NewVU(1, 1, ch)
 
 					ctx, cancel := context.WithCancel(context.Background())
 					defer cancel()
+
+					initVU, err := r.NewVU(ctx, 1, 1, ch)
+					require.NoError(t, err)
 					vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
-					require.NoError(t, err)
-					err = vu.RunOnce()
-					require.NoError(t, err)
+					require.NoError(t, vu.RunOnce())
 				})
 			}
 		})
@@ -161,13 +163,12 @@ func TestLoadExportsIsUsableInModule(t *testing.T) {
 			t.Parallel()
 			ch := newDevNullSampleChannel()
 			defer close(ch)
-			initVU, err := r.NewVU(1, 1, ch)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			initVU, err := r.NewVU(ctx, 1, 1, ch)
+			require.NoError(t, err)
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
-			require.NoError(t, err)
-			err = vu.RunOnce()
-			require.NoError(t, err)
+			require.NoError(t, vu.RunOnce())
 		})
 	}
 }
@@ -197,7 +198,7 @@ func TestLoadDoesntBreakHTTPGet(t *testing.T) {
 		`, fs, lib.RuntimeOptions{CompatibilityMode: null.StringFrom("extended")})
 	require.NoError(t, err)
 
-	require.NoError(t, r1.SetOptions(lib.Options{Hosts: tb.Dialer.Hosts}))
+	require.NoError(t, r1.SetOptions(lib.Options{Hosts: types.NullHosts{Trie: tb.Dialer.Hosts}}))
 	arc := r1.MakeArchive()
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
@@ -216,13 +217,12 @@ func TestLoadDoesntBreakHTTPGet(t *testing.T) {
 			t.Parallel()
 			ch := newDevNullSampleChannel()
 			defer close(ch)
-			initVU, err := r.NewVU(1, 1, ch)
-			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
-			err = vu.RunOnce()
+			initVU, err := r.NewVU(ctx, 1, 1, ch)
 			require.NoError(t, err)
+			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
+			require.NoError(t, vu.RunOnce())
 		})
 	}
 }
@@ -269,22 +269,20 @@ func TestLoadGlobalVarsAreNotSharedBetweenVUs(t *testing.T) {
 			t.Parallel()
 			ch := newDevNullSampleChannel()
 			defer close(ch)
-			initVU, err := r.NewVU(1, 1, ch)
-			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
-			err = vu.RunOnce()
+			initVU, err := r.NewVU(ctx, 1, 1, ch)
 			require.NoError(t, err)
+			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
+			require.NoError(t, vu.RunOnce())
 
 			// run a second VU
-			initVU, err = r.NewVU(2, 2, ch)
-			require.NoError(t, err)
 			ctx, cancel = context.WithCancel(context.Background())
 			defer cancel()
-			vu = initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
-			err = vu.RunOnce()
+			initVU, err = r.NewVU(ctx, 2, 2, ch)
 			require.NoError(t, err)
+			vu = initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
+			require.NoError(t, vu.RunOnce())
 		})
 	}
 }
@@ -341,13 +339,12 @@ func TestLoadCycle(t *testing.T) {
 			t.Parallel()
 			ch := newDevNullSampleChannel()
 			defer close(ch)
-			initVU, err := r.NewVU(1, 1, ch)
-			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
-			err = vu.RunOnce()
+			initVU, err := r.NewVU(ctx, 1, 1, ch)
 			require.NoError(t, err)
+			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
+			require.NoError(t, vu.RunOnce())
 		})
 	}
 }
@@ -411,13 +408,12 @@ func TestLoadCycleBinding(t *testing.T) {
 			t.Parallel()
 			ch := newDevNullSampleChannel()
 			defer close(ch)
-			initVU, err := r.NewVU(1, 1, ch)
-			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
-			err = vu.RunOnce()
+			initVU, err := r.NewVU(ctx, 1, 1, ch)
 			require.NoError(t, err)
+			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
+			require.NoError(t, vu.RunOnce())
 		})
 	}
 }
@@ -483,13 +479,12 @@ func TestBrowserified(t *testing.T) {
 			t.Parallel()
 			ch := make(chan metrics.SampleContainer, 100)
 			defer close(ch)
-			initVU, err := r.NewVU(1, 1, ch)
-			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
-			err = vu.RunOnce()
+			initVU, err := r.NewVU(ctx, 1, 1, ch)
 			require.NoError(t, err)
+			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
+			require.NoError(t, vu.RunOnce())
 		})
 	}
 }
@@ -534,13 +529,12 @@ func TestLoadingUnexistingModuleDoesntPanic(t *testing.T) {
 			t.Parallel()
 			ch := newDevNullSampleChannel()
 			defer close(ch)
-			initVU, err := r.NewVU(1, 1, ch)
-			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
-			err = vu.RunOnce()
+			initVU, err := r.NewVU(ctx, 1, 1, ch)
 			require.NoError(t, err)
+			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
+			require.NoError(t, vu.RunOnce())
 		})
 	}
 }
@@ -578,13 +572,12 @@ func TestLoadingSourceMapsDoesntErrorOut(t *testing.T) {
 			t.Parallel()
 			ch := newDevNullSampleChannel()
 			defer close(ch)
-			initVU, err := r.NewVU(1, 1, ch)
-			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
-			err = vu.RunOnce()
+			initVU, err := r.NewVU(ctx, 1, 1, ch)
 			require.NoError(t, err)
+			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
+			require.NoError(t, vu.RunOnce())
 		})
 	}
 }
@@ -638,14 +631,12 @@ func TestOptionsAreGloballyReadable(t *testing.T) {
 			t.Parallel()
 			ch := newDevNullSampleChannel()
 			defer close(ch)
-			initVU, err := r.NewVU(1, 1, ch)
-
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			initVU, err := r.NewVU(ctx, 1, 1, ch)
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			require.NoError(t, err)
-			err = vu.RunOnce()
-			require.NoError(t, err)
+			require.NoError(t, vu.RunOnce())
 		})
 	}
 }

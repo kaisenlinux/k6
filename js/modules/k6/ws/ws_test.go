@@ -217,7 +217,7 @@ func TestSessionInterval(t *testing.T) {
 	assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(test.samples), "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
 }
 
-func TestSessionBadInterval(t *testing.T) {
+func TestSessionNegativeInterval(t *testing.T) {
 	t.Parallel()
 	tb := httpmultibin.NewHTTPMultiBin(t)
 	sr := tb.Replacer.Replace
@@ -234,6 +234,24 @@ func TestSessionBadInterval(t *testing.T) {
 		`))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "setInterval requires a >0 timeout parameter, received -1.23 ")
+}
+
+func TestSessionIntervalSub1(t *testing.T) {
+	t.Parallel()
+	tb := httpmultibin.NewHTTPMultiBin(t)
+	sr := tb.Replacer.Replace
+
+	test := newTestState(t)
+	_, err := test.VU.Runtime().RunString(sr(`
+		var counter = 0;
+		var res = ws.connect("WSBIN_URL/ws-echo", function(socket){
+			socket.setInterval(function () {
+				counter += 1;
+				if (counter > 2) { socket.close(); }
+			}, 0.3);
+		});
+		`))
+	require.NoError(t, err)
 }
 
 func TestSessionTimeout(t *testing.T) {
@@ -275,9 +293,7 @@ func TestSessionBadTimeout(t *testing.T) {
 		});
 		`))
 	require.ErrorContains(t, err, "setTimeout requires a >0 timeout parameter, received 0.00 ")
-	// TODO SessionDuration is not emitted if the "open" handler returns an error - which is what happens here
-	// see https://github.com/grafana/k6/issues/2734
-	// assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(test.samples), "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
+	assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(test.samples), "", sr("WSBIN_URL/ws-echo"), statusProtocolSwitch, "")
 }
 
 func TestSessionPing(t *testing.T) {
@@ -727,6 +743,21 @@ func TestErrors(t *testing.T) {
 		require.NoError(t, err)
 		assertSessionMetricsEmitted(t, metrics.GetBufferedSamples(test.samples), "", sr("WSBIN_URL/ws-close"), statusProtocolSwitch, "")
 	})
+}
+
+func TestConnectWrongStatusCode(t *testing.T) {
+	t.Parallel()
+	test := newTestState(t)
+	tb := httpmultibin.NewHTTPMultiBin(t)
+	sr := tb.Replacer.Replace
+	test.VU.StateField.Options.Throw = null.BoolFrom(false)
+	_, err := test.VU.Runtime().RunString(sr(`
+	var res = ws.connect("WSBIN_URL/status/404", function(socket){});
+	if (res.status != 404) {
+		throw new Error ("no status code set for invalid response");
+	}
+	`))
+	assert.NoError(t, err)
 }
 
 func TestSystemTags(t *testing.T) {
@@ -1233,8 +1264,7 @@ func TestWSConnectDisableThrowErrorOption(t *testing.T) {
 			throw new Error("res.error is expected to be not null");
 		}
 		`)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	entries := logHook.Drain()
-	require.Len(t, entries, 1)
-	assert.Contains(t, entries[0].Message, "Attempt to establish a WebSocket connection failed")
+	assert.Empty(t, entries)
 }

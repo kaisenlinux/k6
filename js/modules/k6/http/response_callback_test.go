@@ -3,6 +3,7 @@ package http
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/dop251/goja"
@@ -14,7 +15,8 @@ import (
 
 func TestExpectedStatuses(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := getTestModuleInstance(t)
+	runtime, _ := getTestModuleInstance(t)
+	rt := runtime.VU.RuntimeField
 
 	cases := map[string]struct {
 		code, err string
@@ -81,7 +83,10 @@ type expectedSample struct {
 
 func TestResponseCallbackInAction(t *testing.T) {
 	t.Parallel()
-	tb, _, samples, rt, mii := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	samples := ts.samples
+
 	sr := tb.Replacer.Replace
 
 	HTTPMetricsWithoutFailed := []string{
@@ -133,7 +138,7 @@ func TestResponseCallbackInAction(t *testing.T) {
 		"overwrite per request": {
 			code: `
 			http.setResponseCallback(http.expectedStatuses(200));
-			res = http.request("GET", "HTTPBIN_URL/redirect/1");
+			http.request("GET", "HTTPBIN_URL/redirect/1");
 			`,
 			expectedSamples: []expectedSample{
 				{
@@ -222,7 +227,7 @@ func TestResponseCallbackInAction(t *testing.T) {
 		"global overwrite with null": {
 			code: `
 			http.setResponseCallback(null);
-			res = http.request("GET", "HTTPBIN_URL/redirect/1");
+			http.request("GET", "HTTPBIN_URL/redirect/1");
 			`,
 			expectedSamples: []expectedSample{
 				{
@@ -252,10 +257,16 @@ func TestResponseCallbackInAction(t *testing.T) {
 	}
 	for name, testCase := range testCases {
 		testCase := testCase
-		t.Run(name, func(t *testing.T) {
-			mii.defaultClient.responseCallback = defaultExpectedStatuses.match
 
-			_, err := rt.RunString(sr(testCase.code))
+		runCode := func(code string) {
+			t.Helper()
+			ts.instance.defaultClient.responseCallback = defaultExpectedStatuses.match
+
+			err := ts.runtime.EventLoop.Start(func() error {
+				_, err := ts.runtime.VU.Runtime().RunString(sr(code))
+				return err
+			})
+			ts.runtime.EventLoop.WaitOnRegistered()
 			assert.NoError(t, err)
 			bufSamples := metrics.GetBufferedSamples(samples)
 
@@ -273,13 +284,23 @@ func TestResponseCallbackInAction(t *testing.T) {
 			for i, expectedSample := range testCase.expectedSamples {
 				assertRequestMetricsEmittedSingle(t, bufSamples[i], expectedSample.tags, expectedSample.metrics, nil)
 			}
+		}
+		t.Run(name, func(t *testing.T) {
+			runCode(testCase.code)
+		})
+		t.Run("async_"+name, func(t *testing.T) {
+			runCode(strings.ReplaceAll(testCase.code, "http.request", "http.asyncRequest"))
 		})
 	}
 }
 
 func TestResponseCallbackBatch(t *testing.T) {
 	t.Parallel()
-	tb, _, samples, rt, mii := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	samples := ts.samples
+	rt := ts.runtime.VU.Runtime()
+
 	sr := tb.Replacer.Replace
 
 	HTTPMetricsWithoutFailed := []string{
@@ -362,7 +383,7 @@ func TestResponseCallbackBatch(t *testing.T) {
 	for name, testCase := range testCases {
 		testCase := testCase
 		t.Run(name, func(t *testing.T) {
-			mii.defaultClient.responseCallback = defaultExpectedStatuses.match
+			ts.instance.defaultClient.responseCallback = defaultExpectedStatuses.match
 
 			_, err := rt.RunString(sr(testCase.code))
 			assert.NoError(t, err)
@@ -393,7 +414,11 @@ func TestResponseCallbackBatch(t *testing.T) {
 
 func TestResponseCallbackInActionWithoutPassedTag(t *testing.T) {
 	t.Parallel()
-	tb, state, samples, rt, _ := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	samples := ts.samples
+	rt := ts.runtime.VU.Runtime()
+	state := ts.runtime.VU.State()
 	sr := tb.Replacer.Replace
 	allHTTPMetrics := []string{
 		metrics.HTTPReqsName,
@@ -448,7 +473,10 @@ func TestResponseCallbackInActionWithoutPassedTag(t *testing.T) {
 
 func TestDigestWithResponseCallback(t *testing.T) {
 	t.Parallel()
-	tb, _, samples, rt, _ := newRuntime(t)
+	ts := newTestCase(t)
+	tb := ts.tb
+	samples := ts.samples
+	rt := ts.runtime.VU.Runtime()
 
 	urlWithCreds := tb.Replacer.Replace(
 		"http://testuser:testpwd@HTTPBIN_IP:HTTPBIN_PORT/digest-auth/auth/testuser/testpwd",

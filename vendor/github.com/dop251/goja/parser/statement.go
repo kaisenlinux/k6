@@ -73,9 +73,15 @@ func (self *_parser) parseStatement() ast.Statement {
 		self.insertSemicolon = true
 	case token.CONST:
 		return self.parseLexicalDeclaration(self.token)
+	case token.ASYNC:
+		if f := self.parseMaybeAsyncFunction(true); f != nil {
+			return &ast.FunctionDeclaration{
+				Function: f,
+			}
+		}
 	case token.FUNCTION:
 		return &ast.FunctionDeclaration{
-			Function: self.parseFunction(true),
+			Function: self.parseFunction(true, false, self.idx),
 		}
 	case token.CLASS:
 		return &ast.ClassDeclaration{
@@ -161,6 +167,12 @@ func (self *_parser) parseFunctionParameterList() *ast.ParameterList {
 	opening := self.expect(token.LEFT_PARENTHESIS)
 	var list []*ast.Binding
 	var rest ast.Expression
+	if !self.scope.inFuncParams {
+		self.scope.inFuncParams = true
+		defer func() {
+			self.scope.inFuncParams = false
+		}()
+	}
 	for self.token != token.RIGHT_PARENTHESIS && self.token != token.EOF {
 		if self.token == token.ELLIPSIS {
 			self.next()
@@ -182,10 +194,30 @@ func (self *_parser) parseFunctionParameterList() *ast.ParameterList {
 	}
 }
 
-func (self *_parser) parseFunction(declaration bool) *ast.FunctionLiteral {
+func (self *_parser) parseMaybeAsyncFunction(declaration bool) *ast.FunctionLiteral {
+	if self.peek() == token.FUNCTION {
+		idx := self.idx
+		self.next()
+		return self.parseFunction(declaration, true, idx)
+	}
+	return nil
+}
+
+func (self *_parser) parseFunction(declaration, async bool, start file.Idx) *ast.FunctionLiteral {
 
 	node := &ast.FunctionLiteral{
-		Function: self.expect(token.FUNCTION),
+		Function: start,
+		Async:    async,
+	}
+	self.expect(token.FUNCTION)
+
+	if !declaration {
+		if async != self.scope.allowAwait {
+			self.scope.allowAwait = async
+			defer func() {
+				self.scope.allowAwait = !async
+			}()
+		}
 	}
 
 	self.tokenToBindingId()
@@ -197,30 +229,49 @@ func (self *_parser) parseFunction(declaration bool) *ast.FunctionLiteral {
 		self.expect(token.IDENTIFIER)
 	}
 	node.Name = name
+
+	if declaration {
+		if async != self.scope.allowAwait {
+			self.scope.allowAwait = async
+			defer func() {
+				self.scope.allowAwait = !async
+			}()
+		}
+	}
+
 	node.ParameterList = self.parseFunctionParameterList()
-	node.Body, node.DeclarationList = self.parseFunctionBlock()
+	node.Body, node.DeclarationList = self.parseFunctionBlock(async, async)
 	node.Source = self.slice(node.Idx0(), node.Idx1())
 
 	return node
 }
 
-func (self *_parser) parseFunctionBlock() (body *ast.BlockStatement, declarationList []*ast.VariableDeclaration) {
+func (self *_parser) parseFunctionBlock(async, allowAwait bool) (body *ast.BlockStatement, declarationList []*ast.VariableDeclaration) {
 	self.openScope()
-	inFunction := self.scope.inFunction
 	self.scope.inFunction = true
-	defer func() {
-		self.scope.inFunction = inFunction
-		self.closeScope()
-	}()
+	self.scope.inAsync = async
+	self.scope.allowAwait = allowAwait
+	defer self.closeScope()
 	body = self.parseBlockStatement()
 	declarationList = self.scope.declarationList
 	return
 }
 
-func (self *_parser) parseArrowFunctionBody() (ast.ConciseBody, []*ast.VariableDeclaration) {
+func (self *_parser) parseArrowFunctionBody(async bool) (ast.ConciseBody, []*ast.VariableDeclaration) {
 	if self.token == token.LEFT_BRACE {
-		return self.parseFunctionBlock()
+		return self.parseFunctionBlock(async, async)
 	}
+	if async != self.scope.inAsync || async != self.scope.allowAwait {
+		inAsync := self.scope.inAsync
+		allowAwait := self.scope.allowAwait
+		self.scope.inAsync = async
+		self.scope.allowAwait = async
+		defer func() {
+			self.scope.inAsync = inAsync
+			self.scope.allowAwait = allowAwait
+		}()
+	}
+
 	return &ast.ExpressionBody{
 		Expression: self.parseAssignmentExpression(),
 	}, nil
@@ -270,7 +321,7 @@ func (self *_parser) parseClass(declaration bool) *ast.ClassLiteral {
 					b := &ast.ClassStaticBlock{
 						Static: start,
 					}
-					b.Block, b.DeclarationList = self.parseFunctionBlock()
+					b.Block, b.DeclarationList = self.parseFunctionBlock(false, true)
 					b.Source = self.slice(b.Block.LeftBrace, b.Block.Idx1())
 					node.Body = append(node.Body, b)
 					continue
@@ -280,14 +331,21 @@ func (self *_parser) parseClass(declaration bool) *ast.ClassLiteral {
 		}
 
 		var kind ast.PropertyKind
+		var async bool
 		methodBodyStart := self.idx
 		if self.literal == "get" || self.literal == "set" {
-			if self.peek() != token.LEFT_PARENTHESIS {
+			if tok := self.peek(); tok != token.SEMICOLON && tok != token.LEFT_PARENTHESIS {
 				if self.literal == "get" {
 					kind = ast.PropertyKindGet
 				} else {
 					kind = ast.PropertyKindSet
 				}
+				self.next()
+			}
+		} else if self.token == token.ASYNC {
+			if tok := self.peek(); tok != token.SEMICOLON && tok != token.LEFT_PARENTHESIS {
+				async = true
+				kind = ast.PropertyKindMethod
 				self.next()
 			}
 		}
@@ -309,9 +367,13 @@ func (self *_parser) parseClass(declaration bool) *ast.ClassLiteral {
 
 		if kind != "" {
 			// method
-			if keyName == "constructor" {
-				if !computed && !static && kind != ast.PropertyKindMethod {
-					self.error(value.Idx0(), "Class constructor may not be an accessor")
+			if keyName == "constructor" && !computed {
+				if !static {
+					if kind != ast.PropertyKindMethod {
+						self.error(value.Idx0(), "Class constructor may not be an accessor")
+					} else if async {
+						self.error(value.Idx0(), "Class constructor may not be an async method")
+					}
 				} else if private {
 					self.error(value.Idx0(), "Class constructor may not be a private method")
 				}
@@ -320,7 +382,7 @@ func (self *_parser) parseClass(declaration bool) *ast.ClassLiteral {
 				Idx:      start,
 				Key:      value,
 				Kind:     kind,
-				Body:     self.parseMethodDefinition(methodBodyStart, kind),
+				Body:     self.parseMethodDefinition(methodBodyStart, kind, async),
 				Static:   static,
 				Computed: computed,
 			}
@@ -488,6 +550,7 @@ func (self *_parser) parseCaseStatement() *ast.CaseStatement {
 			self.token == token.DEFAULT {
 			break
 		}
+		self.scope.allowLet = true
 		node.Consequent = append(node.Consequent, self.parseStatement())
 
 	}
@@ -790,8 +853,6 @@ func (self *_parser) parseSourceElements() (body []ast.Statement) {
 }
 
 func (self *_parser) parseProgram() *ast.Program {
-	self.openScope()
-	defer self.closeScope()
 	prg := &ast.Program{
 		Body:            self.parseSourceElements(),
 		DeclarationList: self.scope.declarationList,

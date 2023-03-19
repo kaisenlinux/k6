@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"go.k6.io/k6/lib/types"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v3"
@@ -30,7 +32,7 @@ func BenchmarkHTTPRequests(b *testing.B) {
 	err = r.SetOptions(lib.Options{
 		Throw:          null.BoolFrom(true),
 		MaxRedirects:   null.IntFrom(10),
-		Hosts:          tb.Dialer.Hosts,
+		Hosts:          types.NullHosts{Trie: tb.Dialer.Hosts},
 		NoCookiesReset: null.BoolFrom(true),
 		SystemTags:     &metrics.DefaultSystemTagSet,
 		RunTags:        map[string]string{"myapp": "myhttpbench"},
@@ -43,10 +45,10 @@ func BenchmarkHTTPRequests(b *testing.B) {
 		for range ch {
 		}
 	}()
-	initVU, err := r.NewVU(1, 1, ch)
-	require.NoError(b, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	initVU, err := r.NewVU(ctx, 1, 1, ch)
+	require.NoError(b, err)
 	vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
@@ -70,7 +72,7 @@ func BenchmarkHTTPRequestsBase(b *testing.B) {
 	err = r.SetOptions(lib.Options{
 		Throw:          null.BoolFrom(true),
 		MaxRedirects:   null.IntFrom(10),
-		Hosts:          tb.Dialer.Hosts,
+		Hosts:          types.NullHosts{Trie: tb.Dialer.Hosts},
 		NoCookiesReset: null.BoolFrom(true),
 	})
 	require.NoError(b, err)
@@ -81,10 +83,10 @@ func BenchmarkHTTPRequestsBase(b *testing.B) {
 		for range ch {
 		}
 	}()
-	initVU, err := r.NewVU(1, 1, ch)
-	require.NoError(b, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	initVU, err := r.NewVU(ctx, 1, 1, ch)
+	require.NoError(b, err)
 	vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {

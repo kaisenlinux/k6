@@ -1,6 +1,7 @@
 package js
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io/ioutil"
@@ -91,7 +92,7 @@ func TestNewBundle(t *testing.T) {
 		_, err := getSimpleBundle(t, "/script.js", `throw new Error("aaaa");`)
 		exception := new(scriptException)
 		require.ErrorAs(t, err, &exception)
-		require.EqualError(t, err, "Error: aaaa\n\tat file:///script.js:2:7(3)\n\tat native\n")
+		require.EqualError(t, err, "Error: aaaa\n\tat file:///script.js:2:7(3)\n")
 	})
 	t.Run("InvalidExports", func(t *testing.T) {
 		t.Parallel()
@@ -170,7 +171,7 @@ func TestNewBundle(t *testing.T) {
 				{
 					"BigInt", "base",
 					`module.exports.default = function() {}; BigInt(1231412444)`,
-					"ReferenceError: BigInt is not defined\n\tat file:///script.js:2:47(7)\n\tat native\n",
+					"ReferenceError: BigInt is not defined\n\tat file:///script.js:2:47(7)\n",
 				},
 			}
 
@@ -201,7 +202,7 @@ func TestNewBundle(t *testing.T) {
 				Expr, Error string
 			}{
 				"Array":    {`[]`, "json: cannot unmarshal array into Go value of type lib.Options"},
-				"Function": {`function(){}`, "json: unsupported type: func(goja.FunctionCall) goja.Value"},
+				"Function": {`function(){}`, "error parsing script options: json: unsupported type: func(goja.FunctionCall) goja.Value"},
 			}
 			for name, data := range invalidOptions {
 				t.Run(name, func(t *testing.T) {
@@ -476,9 +477,9 @@ func TestNewBundleFromArchive(t *testing.T) {
 	logger := testutils.NewLogger(t)
 	checkBundle := func(t *testing.T, b *Bundle) {
 		require.Equal(t, lib.Options{VUs: null.IntFrom(12345)}, b.Options)
-		bi, err := b.Instantiate(logger, 0)
+		bi, err := b.Instantiate(context.Background(), 0)
 		require.NoError(t, err)
-		val, err := bi.exports[consts.DefaultFn](goja.Undefined())
+		val, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 		require.NoError(t, err)
 		require.Equal(t, "hi!", val.Export())
 	}
@@ -569,9 +570,9 @@ func TestNewBundleFromArchive(t *testing.T) {
 		}
 		b, err := NewBundleFromArchive(getTestPreInitState(t, logger, nil), arc)
 		require.NoError(t, err)
-		bi, err := b.Instantiate(logger, 0)
+		bi, err := b.Instantiate(context.Background(), 0)
 		require.NoError(t, err)
-		val, err := bi.exports[consts.DefaultFn](goja.Undefined())
+		val, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 		require.NoError(t, err)
 		require.Equal(t, int64(999), val.Export())
 	})
@@ -713,9 +714,9 @@ func TestOpen(t *testing.T) {
 					for source, b := range map[string]*Bundle{"source": sourceBundle, "archive": arcBundle} {
 						b := b
 						t.Run(source, func(t *testing.T) {
-							bi, err := b.Instantiate(logger, 0)
+							bi, err := b.Instantiate(context.Background(), 0)
 							require.NoError(t, err)
-							v, err := bi.exports[consts.DefaultFn](goja.Undefined())
+							v, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 							require.NoError(t, err)
 							require.Equal(t, "hi", v.Export())
 						})
@@ -747,11 +748,10 @@ func TestBundleInstantiate(t *testing.T) {
 		export default function() { return val; }
 	`)
 		require.NoError(t, err)
-		logger := testutils.NewLogger(t)
 
-		bi, err := b.Instantiate(logger, 0)
+		bi, err := b.Instantiate(context.Background(), 0)
 		require.NoError(t, err)
-		v, err := bi.exports[consts.DefaultFn](goja.Undefined())
+		v, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 		require.NoError(t, err)
 		require.Equal(t, true, v.Export())
 	})
@@ -767,12 +767,11 @@ func TestBundleInstantiate(t *testing.T) {
 			export default function() { return val; }
 		`)
 		require.NoError(t, err)
-		logger := testutils.NewLogger(t)
 
-		bi, err := b.Instantiate(logger, 0)
+		bi, err := b.Instantiate(context.Background(), 0)
 		require.NoError(t, err)
 		// Ensure `options` properties are correctly marshalled
-		jsOptions := bi.pgm.exports.Get("options").ToObject(bi.Runtime)
+		jsOptions := bi.getExported("options").ToObject(bi.Runtime)
 		vus := jsOptions.Get("vus").Export()
 		require.Equal(t, int64(5), vus)
 		tdt := jsOptions.Get("teardownTimeout").Export()
@@ -781,9 +780,9 @@ func TestBundleInstantiate(t *testing.T) {
 		// Ensure options propagate correctly from outside to the script
 		optOrig := b.Options.VUs
 		b.Options.VUs = null.IntFrom(10)
-		bi2, err := b.Instantiate(logger, 0)
+		bi2, err := b.Instantiate(context.Background(), 0)
 		require.NoError(t, err)
-		jsOptions = bi2.pgm.exports.Get("options").ToObject(bi2.Runtime)
+		jsOptions = bi2.getExported("options").ToObject(bi2.Runtime)
 		vus = jsOptions.Get("vus").Export()
 		require.Equal(t, int64(10), vus)
 		b.Options.VUs = optOrig
@@ -814,12 +813,12 @@ func TestBundleEnv(t *testing.T) {
 		b := b
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, "1", b.RuntimeOptions.Env["TEST_A"])
-			require.Equal(t, "", b.RuntimeOptions.Env["TEST_B"])
+			require.Equal(t, "1", b.preInitState.RuntimeOptions.Env["TEST_A"])
+			require.Equal(t, "", b.preInitState.RuntimeOptions.Env["TEST_B"])
 
-			bi, err := b.Instantiate(logger, 0)
+			bi, err := b.Instantiate(context.Background(), 0)
 			require.NoError(t, err)
-			_, err = bi.exports[consts.DefaultFn](goja.Undefined())
+			_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 			require.NoError(t, err)
 		})
 	}
@@ -853,11 +852,11 @@ func TestBundleNotSharable(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			for i := 0; i < vus; i++ {
-				bi, err := b.Instantiate(logger, uint64(i))
+				bi, err := b.Instantiate(context.Background(), uint64(i))
 				require.NoError(t, err)
 				for j := 0; j < iters; j++ {
 					bi.Runtime.Set("__ITER", j)
-					_, err := bi.exports[consts.DefaultFn](goja.Undefined())
+					_, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
 					require.NoError(t, err)
 				}
 			}

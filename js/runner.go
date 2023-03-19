@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -112,8 +111,10 @@ func (r *Runner) MakeArchive() *lib.Archive {
 }
 
 // NewVU returns a new initialized VU.
-func (r *Runner) NewVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.SampleContainer) (lib.InitializedVU, error) {
-	vu, err := r.newVU(idLocal, idGlobal, samplesOut)
+func (r *Runner) NewVU(
+	ctx context.Context, idLocal, idGlobal uint64, samplesOut chan<- metrics.SampleContainer,
+) (lib.InitializedVU, error) {
+	vu, err := r.newVU(ctx, idLocal, idGlobal, samplesOut)
 	if err != nil {
 		return nil, err
 	}
@@ -121,9 +122,11 @@ func (r *Runner) NewVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 }
 
 //nolint:funlen
-func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.SampleContainer) (*VU, error) {
+func (r *Runner) newVU(
+	ctx context.Context, idLocal, idGlobal uint64, samplesOut chan<- metrics.SampleContainer,
+) (*VU, error) {
 	// Instantiate a new bundle, make a VU out of it.
-	bi, err := r.Bundle.Instantiate(r.preInitState.Logger, idLocal)
+	bi, err := r.Bundle.Instantiate(ctx, idLocal)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +160,7 @@ func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 		Resolver:         r.Resolver,
 		Blacklist:        r.Bundle.Options.BlacklistIPs,
 		BlockedHostnames: r.Bundle.Options.BlockedHostnames.Trie,
-		Hosts:            r.Bundle.Options.Hosts,
+		Hosts:            r.Bundle.Options.Hosts.Trie,
 	}
 	if r.Bundle.Options.LocalIPs.Valid {
 		var ipIndex uint64
@@ -199,7 +202,7 @@ func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 		MaxIdleConnsPerHost: int(r.Bundle.Options.BatchPerHost.Int64),
 	}
 
-	if forceHTTP1() {
+	if r.forceHTTP1() {
 		transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper) // send over h1 protocol
 	} else {
 		_ = http2.ConfigureTransport(transport) // send over h2 protocol
@@ -257,8 +260,11 @@ func (r *Runner) newVU(idLocal, idGlobal uint64, samplesOut chan<- metrics.Sampl
 
 // forceHTTP1 checks if force http1 env variable has been set in order to force requests to be sent over h1
 // TODO: This feature is temporary until #936 is resolved
-func forceHTTP1() bool {
-	godebug := os.Getenv("GODEBUG")
+func (r *Runner) forceHTTP1() bool {
+	if r.preInitState.LookupEnv == nil {
+		return false
+	}
+	godebug, _ := r.preInitState.LookupEnv("GODEBUG")
 	if godebug == "" {
 		return false
 	}
@@ -274,6 +280,14 @@ func forceHTTP1() bool {
 
 // Setup runs the setup function if there is one and sets the setupData to the returned value
 func (r *Runner) Setup(ctx context.Context, out chan<- metrics.SampleContainer) error {
+	if !r.IsExecutable(consts.SetupFn) {
+		// do not init a new transient VU or execute setup() if it wasn't
+		// actually defined and exported in the script
+		r.preInitState.Logger.Debugf("%s() is not defined or not exported, skipping!", consts.SetupFn)
+		return nil
+	}
+	r.preInitState.Logger.Debugf("Running %s()...", consts.SetupFn)
+
 	setupCtx, setupCancel := context.WithTimeout(ctx, r.getTimeoutFor(consts.SetupFn))
 	defer setupCancel()
 
@@ -307,6 +321,14 @@ func (r *Runner) SetSetupData(data []byte) {
 
 // Teardown runs the teardown function if there is one.
 func (r *Runner) Teardown(ctx context.Context, out chan<- metrics.SampleContainer) error {
+	if !r.IsExecutable(consts.TeardownFn) {
+		// do not init a new transient VU or execute teardown() if it wasn't
+		// actually defined and exported in the script
+		r.preInitState.Logger.Debugf("%s() is not defined or not exported, skipping!", consts.TeardownFn)
+		return nil
+	}
+	r.preInitState.Logger.Debugf("Running %s()...", consts.TeardownFn)
+
 	teardownCtx, teardownCancel := context.WithTimeout(ctx, r.getTimeoutFor(consts.TeardownFn))
 	defer teardownCancel()
 
@@ -349,7 +371,10 @@ func (r *Runner) HandleSummary(ctx context.Context, summary *lib.Summary) (map[s
 		}
 	}()
 
-	vu, err := r.newVU(0, 0, out)
+	summaryCtx, cancel := context.WithTimeout(ctx, r.getTimeoutFor(consts.HandleSummaryFn))
+	defer cancel()
+
+	vu, err := r.newVU(summaryCtx, 0, 0, out)
 	if err != nil {
 		return nil, err
 	}
@@ -362,13 +387,11 @@ func (r *Runner) HandleSummary(ctx context.Context, summary *lib.Summary) (map[s
 		return nil, fmt.Errorf("exported identifier %s must be a function", consts.HandleSummaryFn)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, r.getTimeoutFor(consts.HandleSummaryFn))
-	defer cancel()
 	go func() {
-		<-ctx.Done()
+		<-summaryCtx.Done()
 		vu.Runtime.Interrupt(context.Canceled)
 	}()
-	vu.moduleVUImpl.ctx = ctx
+	vu.moduleVUImpl.ctx = summaryCtx
 
 	wrapper := strings.Replace(summaryWrapperLambdaCode, "/*JSLIB_SUMMARY_CODE*/", jslibSummaryCode, 1)
 	handleSummaryWrapperRaw, err := vu.Runtime.RunString(wrapper)
@@ -382,14 +405,14 @@ func (r *Runner) HandleSummary(ctx context.Context, summary *lib.Summary) (map[s
 
 	wrapperArgs := []goja.Value{
 		handleSummaryFn,
-		vu.Runtime.ToValue(r.Bundle.RuntimeOptions.SummaryExport.String),
+		vu.Runtime.ToValue(r.Bundle.preInitState.RuntimeOptions.SummaryExport.String),
 		vu.Runtime.ToValue(summaryDataForJS),
 	}
-	rawResult, _, _, err := vu.runFn(ctx, false, handleSummaryWrapper, nil, wrapperArgs...)
+	rawResult, _, _, err := vu.runFn(summaryCtx, false, handleSummaryWrapper, nil, wrapperArgs...)
 
 	// TODO: refactor the whole JS runner to avoid copy-pasting these complicated bits...
 	// deadline is reached so we have timeouted but this might've not been registered correctly
-	if deadline, ok := ctx.Deadline(); ok && time.Now().After(deadline) {
+	if deadline, ok := summaryCtx.Deadline(); ok && time.Now().After(deadline) {
 		// we could have an error that is not context.Canceled in which case we should return it instead
 		if err, ok := err.(*goja.InterruptedError); ok && rawResult != nil && err.Value() != context.Canceled {
 			// TODO: silence this error?
@@ -487,12 +510,15 @@ func parseTTL(ttlS string) (time.Duration, error) {
 // Runs an exported function in its own temporary VU, optionally with an argument. Execution is
 // interrupted if the context expires. No error is returned if the part does not exist.
 func (r *Runner) runPart(
-	ctx context.Context,
+	parentCtx context.Context,
 	out chan<- metrics.SampleContainer,
 	name string,
 	arg interface{},
 ) (goja.Value, error) {
-	vu, err := r.newVU(0, 0, out)
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	vu, err := r.newVU(ctx, 0, 0, out)
 	if err != nil {
 		return goja.Undefined(), err
 	}
@@ -501,8 +527,6 @@ func (r *Runner) runPart(
 		return goja.Undefined(), nil
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	go func() {
 		<-ctx.Done()
 		vu.Runtime.Interrupt(context.Canceled)
@@ -699,8 +723,8 @@ func (u *ActiveVU) RunOnce() error {
 		}
 	}
 
-	fn, ok := u.exports[u.Exec]
-	if !ok {
+	fn := u.getCallableExport(u.Exec)
+	if fn == nil {
 		// Shouldn't happen; this is validated in cmd.validateScenarioConfig()
 		panic(fmt.Sprintf("function '%s' not found in exports", u.Exec))
 	}
@@ -741,7 +765,7 @@ func (u *ActiveVU) RunOnce() error {
 }
 
 func (u *VU) getExported(name string) goja.Value {
-	return u.BundleInstance.pgm.module.Get("exports").ToObject(u.Runtime).Get(name)
+	return u.BundleInstance.getExported(name)
 }
 
 // if isDefault is true, cancel also needs to be provided and it should cancel the provided context
@@ -823,11 +847,12 @@ type scriptException struct {
 	inner *goja.Exception
 }
 
-var (
-	_ errext.Exception   = &scriptException{}
-	_ errext.HasExitCode = &scriptException{}
-	_ errext.HasHint     = &scriptException{}
-)
+var _ interface {
+	errext.Exception
+	errext.HasExitCode
+	errext.HasHint
+	errext.HasAbortReason
+} = &scriptException{}
 
 func (s *scriptException) Error() string {
 	// this calls String instead of error so that by default if it's printed to print the stacktrace
@@ -844,6 +869,10 @@ func (s *scriptException) Unwrap() error {
 
 func (s *scriptException) Hint() string {
 	return "script exception"
+}
+
+func (s *scriptException) AbortReason() errext.AbortReason {
+	return errext.AbortedByScriptError
 }
 
 func (s *scriptException) ExitCode() exitcodes.ExitCode {

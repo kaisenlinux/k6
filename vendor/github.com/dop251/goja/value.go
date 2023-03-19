@@ -935,6 +935,13 @@ func (o *Object) MarshalJSON() ([]byte, error) {
 	return ctx.buf.Bytes(), nil
 }
 
+// UnmarshalJSON implements the json.Unmarshaler interface. It is added to compliment MarshalJSON, because
+// some alternative JSON encoders refuse to use MarshalJSON unless UnmarshalJSON is also present.
+// It is a no-op and always returns nil.
+func (o *Object) UnmarshalJSON([]byte) error {
+	return nil
+}
+
 // ClassName returns the class name
 func (o *Object) ClassName() string {
 	return o.self.className()
@@ -1165,7 +1172,6 @@ func typeErrorResult(throw bool, args ...interface{}) {
 
 func init() {
 	for i := 0; i < 256; i++ {
-		intCache[i] = valueInt(i - 128)
+		intCache[i] = valueInt(i - 256)
 	}
-	_positiveZero = intToValue(0)
 }

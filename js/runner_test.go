@@ -33,9 +33,8 @@ import (
 	"google.golang.org/grpc/test/grpc_testing"
 	"gopkg.in/guregu/null.v3"
 
-	"go.k6.io/k6/core"
-	"go.k6.io/k6/core/local"
 	"go.k6.io/k6/errext"
+	"go.k6.io/k6/execution"
 	"go.k6.io/k6/js/modules/k6"
 	k6http "go.k6.io/k6/js/modules/k6/http"
 	k6metrics "go.k6.io/k6/js/modules/k6/metrics"
@@ -48,6 +47,7 @@ import (
 	"go.k6.io/k6/lib/testutils/mockoutput"
 	"go.k6.io/k6/lib/types"
 	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/metrics/engine"
 	"go.k6.io/k6/output"
 )
 
@@ -63,19 +63,21 @@ func TestRunnerNew(t *testing.T) {
 
 		t.Run("NewVU", func(t *testing.T) {
 			t.Parallel()
-			initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
-			require.NoError(t, err)
-			vuc, ok := initVU.(*VU)
-			require.True(t, ok)
-			assert.Equal(t, int64(0), vuc.pgm.exports.Get("counter").Export())
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+
+			initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
+			require.NoError(t, err)
+			vuc, ok := initVU.(*VU)
+			require.True(t, ok)
+			assert.Equal(t, int64(0), vuc.getExported("counter").Export())
+
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			t.Run("RunOnce", func(t *testing.T) {
 				err = vu.RunOnce()
 				require.NoError(t, err)
-				assert.Equal(t, int64(1), vuc.pgm.exports.Get("counter").Export())
+				assert.Equal(t, int64(1), vuc.getExported("counter").Export())
 			})
 		})
 	})
@@ -83,7 +85,7 @@ func TestRunnerNew(t *testing.T) {
 	t.Run("Invalid", func(t *testing.T) {
 		t.Parallel()
 		_, err := getSimpleRunner(t, "/script.js", `blarg`)
-		assert.EqualError(t, err, "ReferenceError: blarg is not defined\n\tat file:///script.js:2:1(1)\n\tat native\n")
+		assert.EqualError(t, err, "ReferenceError: blarg is not defined\n\tat file:///script.js:2:1(1)\n")
 	})
 }
 
@@ -216,10 +218,10 @@ func TestOptionsSettingToScript(t *testing.T) {
 			require.Equal(t, newOptions, r.GetOptions())
 
 			samples := make(chan metrics.SampleContainer, 100)
-			initVU, err := r.NewVU(1, 1, samples)
-			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			initVU, err := r.NewVU(ctx, 1, 1, samples)
+			require.NoError(t, err)
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			require.NoError(t, vu.RunOnce())
 		})
@@ -271,10 +273,10 @@ func TestOptionsPropagationToScript(t *testing.T) {
 			t.Parallel()
 			samples := make(chan metrics.SampleContainer, 100)
 
-			initVU, err := r.NewVU(1, 1, samples)
-			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			initVU, err := r.NewVU(ctx, 1, 1, samples)
+			require.NoError(t, err)
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			require.NoError(t, vu.RunOnce())
 		})
@@ -382,33 +384,43 @@ func TestDataIsolation(t *testing.T) {
 		RunTags:          runner.preInitState.Registry.RootTagSet().WithTagsFromMap(options.RunTags),
 	}
 
-	execScheduler, err := local.NewExecutionScheduler(testRunState)
+	execScheduler, err := execution.NewScheduler(testRunState)
 	require.NoError(t, err)
+
+	metricsEngine, err := engine.NewMetricsEngine(testRunState)
+	require.NoError(t, err)
+
+	globalCtx, globalCancel := context.WithCancel(context.Background())
+	defer globalCancel()
+	runCtx, runAbort := execution.NewTestRunContext(globalCtx, testRunState.Logger)
 
 	mockOutput := mockoutput.New()
-	engine, err := core.NewEngine(testRunState, execScheduler, []output.Output{mockOutput})
+	outputManager := output.NewManager([]output.Output{mockOutput, metricsEngine.CreateIngester()}, testRunState.Logger, runAbort)
+	samples := make(chan metrics.SampleContainer, 1000)
+	waitForMetricsFlushed, stopOutputs, err := outputManager.Start(samples)
 	require.NoError(t, err)
-	require.NoError(t, engine.OutputManager.StartOutputs())
-	defer engine.OutputManager.StopOutputs()
+	defer stopOutputs(nil)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	run, wait, err := engine.Init(ctx, ctx)
-	require.NoError(t, err)
+	finalizeThresholds := metricsEngine.StartThresholdCalculations(runAbort, execScheduler.GetState().GetCurrentTestRunDuration)
+	require.Nil(t, finalizeThresholds)
 
 	require.Empty(t, runner.defaultGroup.Groups)
 
+	stopEmission, err := execScheduler.Init(runCtx, samples)
+	require.NoError(t, err)
+
 	errC := make(chan error)
-	go func() { errC <- run() }()
+	go func() { errC <- execScheduler.Run(globalCtx, runCtx, samples) }()
 
 	select {
 	case <-time.After(20 * time.Second):
-		cancel()
+		runAbort(fmt.Errorf("unexpected abort"))
 		t.Fatal("Test timed out")
 	case err := <-errC:
-		cancel()
+		stopEmission()
+		close(samples)
 		require.NoError(t, err)
-		wait()
-		require.False(t, engine.IsTainted())
+		waitForMetricsFlushed()
 	}
 	require.Contains(t, runner.defaultGroup.Groups, "setup")
 	require.Contains(t, runner.defaultGroup.Groups, "teardown")
@@ -441,7 +453,7 @@ func testSetupDataHelper(t *testing.T, data string) {
 			samples := make(chan metrics.SampleContainer, 100)
 
 			require.NoError(t, r.Setup(ctx, samples))
-			initVU, err := r.NewVU(1, 1, samples)
+			initVU, err := r.NewVU(ctx, 1, 1, samples)
 			require.NoError(t, err)
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			require.NoError(t, vu.RunOnce())
@@ -502,10 +514,10 @@ func TestConsoleInInitContext(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			samples := make(chan metrics.SampleContainer, 100)
-			initVU, err := r.NewVU(1, 1, samples)
-			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			initVU, err := r.NewVU(ctx, 1, 1, samples)
+			require.NoError(t, err)
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			require.NoError(t, vu.RunOnce())
 		})
@@ -590,10 +602,10 @@ func TestRunnerIntegrationImports(t *testing.T) {
 				for name, r := range testdata {
 					r := r
 					t.Run(name, func(t *testing.T) {
-						initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
-						require.NoError(t, err)
 						ctx, cancel := context.WithCancel(context.Background())
 						defer cancel()
+						initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
+						require.NoError(t, err)
 						vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 						err = vu.RunOnce()
 						require.NoError(t, err)
@@ -628,7 +640,10 @@ func TestVURunContext(t *testing.T) {
 		r := r
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			vu, err := r.newVU(1, 1, make(chan metrics.SampleContainer, 100))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			vu, err := r.newVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
 			require.NoError(t, err)
 
 			fnCalled := false
@@ -646,8 +661,7 @@ func TestVURunContext(t *testing.T) {
 				assert.Equal(t, r.GetDefaultGroup(), state.Group)
 				assert.Equal(t, vu.Transport, state.Transport)
 			})
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+
 			activeVU := vu.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = activeVU.RunOnce()
 			require.NoError(t, err)
@@ -685,11 +699,11 @@ func TestVURunInterrupt(t *testing.T) {
 				}
 			}()
 
-			vu, err := r.newVU(1, 1, samples)
-			require.NoError(t, err)
-
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 			defer cancel()
+
+			vu, err := r.newVU(ctx, 1, 1, samples)
+			require.NoError(t, err)
 			activeVU := vu.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = activeVU.RunOnce()
 			require.Error(t, err)
@@ -730,7 +744,7 @@ func TestVURunInterruptDoesntPanic(t *testing.T) {
 			}()
 			var wg sync.WaitGroup
 
-			initVU, err := r.newVU(1, 1, samples)
+			initVU, err := r.newVU(ctx, 1, 1, samples)
 			require.NoError(t, err)
 			for i := 0; i < 100; i++ {
 				wg.Add(1)
@@ -786,7 +800,10 @@ func TestVUIntegrationGroups(t *testing.T) {
 		r := r
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			vu, err := r.newVU(1, 1, make(chan metrics.SampleContainer, 100))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			vu, err := r.newVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
 			require.NoError(t, err)
 
 			fnOuterCalled := false
@@ -809,8 +826,7 @@ func TestVUIntegrationGroups(t *testing.T) {
 				assert.Equal(t, "my group", g.Parent.Name)
 				assert.Equal(t, r.GetDefaultGroup(), g.Parent.Parent)
 			})
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+
 			activeVU := vu.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = activeVU.RunOnce()
 			require.NoError(t, err)
@@ -848,11 +864,12 @@ func TestVUIntegrationMetrics(t *testing.T) {
 			t.Parallel()
 			samples := make(chan metrics.SampleContainer, 100)
 			defer close(samples)
-			vu, err := r.newVU(1, 1, samples)
-			require.NoError(t, err)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+
+			vu, err := r.newVU(ctx, 1, 1, samples)
+			require.NoError(t, err)
 			activeVU := vu.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = activeVU.RunOnce()
 			require.NoError(t, err)
@@ -1000,7 +1017,7 @@ func TestVUIntegrationInsecureRequests(t *testing.T) {
 	host, port, err := net.SplitHostPort(s.Listener.Addr().String())
 	require.NoError(t, err)
 	ip := net.ParseIP(host)
-	mybadsslHostname, err := lib.NewHostAddress(ip, port)
+	mybadsslHostname, err := types.NewHost(ip, port)
 	require.NoError(t, err)
 	cert, err := x509.ParseCertificate(s.TLS.Certificates[0].Certificate[0])
 	require.NoError(t, err)
@@ -1033,9 +1050,10 @@ func TestVUIntegrationInsecureRequests(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, r1.SetOptions(lib.Options{Throw: null.BoolFrom(true)}.Apply(data.opts)))
 
-			r1.Bundle.Options.Hosts = map[string]*lib.HostAddress{
-				"mybadssl.localhost": mybadsslHostname,
-			}
+			r1.Bundle.Options.Hosts, err = types.NewNullHosts(map[string]types.Host{
+				"mybadssl.localhost": *mybadsslHostname,
+			})
+			require.NoError(t, err)
 			registry := metrics.NewRegistry()
 			builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
 			r2, err := NewFromArchive(
@@ -1052,13 +1070,13 @@ func TestVUIntegrationInsecureRequests(t *testing.T) {
 					t.Parallel()
 					r.preInitState.Logger, _ = logtest.NewNullLogger()
 
-					initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
 					require.NoError(t, err)
 					initVU.(*VU).TLSConfig.RootCAs = x509.NewCertPool() //nolint:forcetypeassert
 					initVU.(*VU).TLSConfig.RootCAs.AddCert(cert)        //nolint:forcetypeassert
 
-					ctx, cancel := context.WithCancel(context.Background())
-					defer cancel()
 					vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 					err = vu.RunOnce()
 					if data.errMsg != "" {
@@ -1101,10 +1119,10 @@ func TestVUIntegrationBlacklistOption(t *testing.T) {
 		r := r
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
-			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
+			require.NoError(t, err)
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = vu.RunOnce()
 			require.Error(t, err)
@@ -1143,10 +1161,10 @@ func TestVUIntegrationBlacklistScript(t *testing.T) {
 		r := r
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
-			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
+			require.NoError(t, err)
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = vu.RunOnce()
 			require.Error(t, err)
@@ -1185,11 +1203,12 @@ func TestVUIntegrationBlockHostnamesOption(t *testing.T) {
 		r := r
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			initVu, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
-			require.NoError(t, err)
-
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+
+			initVu, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
+			require.NoError(t, err)
+
 			vu := initVu.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = vu.RunOnce()
 			require.Error(t, err)
@@ -1228,10 +1247,10 @@ func TestVUIntegrationBlockHostnamesScript(t *testing.T) {
 		r := r
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			initVu, err := r.NewVU(0, 0, make(chan metrics.SampleContainer, 100))
-			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			initVu, err := r.NewVU(ctx, 0, 0, make(chan metrics.SampleContainer, 100))
+			require.NoError(t, err)
 			vu := initVu.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = vu.RunOnce()
 			require.Error(t, err)
@@ -1261,9 +1280,14 @@ func TestVUIntegrationHosts(t *testing.T) {
 
 	r1.SetOptions(lib.Options{
 		Throw: null.BoolFrom(true),
-		Hosts: map[string]*lib.HostAddress{
-			"test.loadimpact.com": {IP: net.ParseIP("127.0.0.1")},
-		},
+		Hosts: func() types.NullHosts {
+			hosts, er := types.NewNullHosts(map[string]types.Host{
+				"test.loadimpact.com": {IP: net.ParseIP("127.0.0.1")},
+			})
+			require.NoError(t, er)
+
+			return hosts
+		}(),
 	})
 
 	registry := metrics.NewRegistry()
@@ -1281,11 +1305,11 @@ func TestVUIntegrationHosts(t *testing.T) {
 		r := r
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
-			require.NoError(t, err)
-
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
+			require.NoError(t, err)
+
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = vu.RunOnce()
 			require.NoError(t, err)
@@ -1306,7 +1330,7 @@ func TestVUIntegrationTLSConfig(t *testing.T) {
 	host, port, err := net.SplitHostPort(s.Listener.Addr().String())
 	require.NoError(t, err)
 	ip := net.ParseIP(host)
-	mybadsslHostname, err := lib.NewHostAddress(ip, port)
+	mybadsslHostname, err := types.NewHost(ip, port)
 	require.NoError(t, err)
 	unsupportedVersionErrorMsg := "remote error: tls: handshake failure"
 	for _, tag := range build.Default.ReleaseTags {
@@ -1364,9 +1388,10 @@ func TestVUIntegrationTLSConfig(t *testing.T) {
 			opts := lib.Options{Throw: null.BoolFrom(true)}
 			require.NoError(t, r1.SetOptions(opts.Apply(data.opts)))
 
-			r1.Bundle.Options.Hosts = map[string]*lib.HostAddress{
-				"sha256-badssl.localhost": mybadsslHostname,
-			}
+			r1.Bundle.Options.Hosts, err = types.NewNullHosts(map[string]types.Host{
+				"sha256-badssl.localhost": *mybadsslHostname,
+			})
+			require.NoError(t, err)
 			r2, err := NewFromArchive(
 				&lib.TestPreInitState{
 					Logger:         testutils.NewLogger(t),
@@ -1382,12 +1407,12 @@ func TestVUIntegrationTLSConfig(t *testing.T) {
 					t.Parallel()
 					r.preInitState.Logger, _ = logtest.NewNullLogger()
 
-					initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
 					require.NoError(t, err)
 					initVU.(*VU).TLSConfig.RootCAs = x509.NewCertPool() //nolint:forcetypeassert
 					initVU.(*VU).TLSConfig.RootCAs.AddCert(cert)        //nolint:forcetypeassert
-					ctx, cancel := context.WithCancel(context.Background())
-					defer cancel()
 					vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 					err = vu.RunOnce()
 					if data.errMsg != "" {
@@ -1409,10 +1434,10 @@ func TestVUIntegrationOpenFunctionError(t *testing.T) {
 		`)
 	require.NoError(t, err)
 
-	initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
-	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
+	require.NoError(t, err)
 	vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 	err = vu.RunOnce()
 	require.Error(t, err)
@@ -1427,10 +1452,10 @@ func TestVUIntegrationOpenFunctionErrorWhenSneaky(t *testing.T) {
 		`)
 	require.NoError(t, err)
 
-	initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
-	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
+	require.NoError(t, err)
 	vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 	err = vu.RunOnce()
 	require.Error(t, err)
@@ -1457,7 +1482,7 @@ func TestVUDoesOpenUnderV0Condition(t *testing.T) {
 	r, err := getSimpleRunner(t, "/script.js", data, fs)
 	require.NoError(t, err)
 
-	_, err = r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
+	_, err = r.NewVU(context.Background(), 1, 1, make(chan metrics.SampleContainer, 100))
 	require.NoError(t, err)
 }
 
@@ -1481,7 +1506,7 @@ func TestVUDoesNotOpenUnderConditions(t *testing.T) {
 	r, err := getSimpleRunner(t, "/script.js", data, fs)
 	require.NoError(t, err)
 
-	_, err = r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
+	_, err = r.NewVU(context.Background(), 1, 1, make(chan metrics.SampleContainer, 100))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "open() can't be used with files that weren't previously opened during initialization (__VU==0)")
 }
@@ -1505,7 +1530,7 @@ func TestVUDoesNonExistingPathnUnderConditions(t *testing.T) {
 	r, err := getSimpleRunner(t, "/script.js", data, fs)
 	require.NoError(t, err)
 
-	_, err = r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
+	_, err = r.NewVU(context.Background(), 1, 1, make(chan metrics.SampleContainer, 100))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "open() can't be used with files that weren't previously opened during initialization (__VU==0)")
 }
@@ -1534,7 +1559,7 @@ func TestVUIntegrationCookiesReset(t *testing.T) {
 	require.NoError(t, err)
 	r1.Bundle.Options.Throw = null.BoolFrom(true)
 	r1.Bundle.Options.MaxRedirects = null.IntFrom(10)
-	r1.Bundle.Options.Hosts = tb.Dialer.Hosts
+	r1.Bundle.Options.Hosts = types.NullHosts{Trie: tb.Dialer.Hosts}
 
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
@@ -1551,10 +1576,10 @@ func TestVUIntegrationCookiesReset(t *testing.T) {
 		r := r
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
-			require.NoError(t, err)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
+			require.NoError(t, err)
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			for i := 0; i < 2; i++ {
 				require.NoError(t, vu.RunOnce())
@@ -1592,7 +1617,7 @@ func TestVUIntegrationCookiesNoReset(t *testing.T) {
 	r1.SetOptions(lib.Options{
 		Throw:          null.BoolFrom(true),
 		MaxRedirects:   null.IntFrom(10),
-		Hosts:          tb.Dialer.Hosts,
+		Hosts:          types.NullHosts{Trie: tb.Dialer.Hosts},
 		NoCookiesReset: null.BoolFrom(true),
 	})
 
@@ -1611,11 +1636,12 @@ func TestVUIntegrationCookiesNoReset(t *testing.T) {
 		r := r
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
-			require.NoError(t, err)
-
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+
+			initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
+			require.NoError(t, err)
+
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = vu.RunOnce()
 			require.NoError(t, err)
@@ -1651,11 +1677,12 @@ func TestVUIntegrationVUID(t *testing.T) {
 		r := r
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			initVU, err := r.NewVU(1234, 1234, make(chan metrics.SampleContainer, 100))
-			require.NoError(t, err)
-
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+
+			initVU, err := r.NewVU(ctx, 1234, 1234, make(chan metrics.SampleContainer, 100))
+			require.NoError(t, err)
+
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = vu.RunOnce()
 			require.NoError(t, err)
@@ -1721,7 +1748,7 @@ func TestVUIntegrationClientCerts(t *testing.T) {
 		insecureSkipVerify bool
 		errMsg             string
 	}{
-		"WithoutCert":      {false, false, true, "remote error: tls: bad certificate"},
+		"WithoutCert":      {false, false, true, "remote error: tls:"},
 		"WithCert":         {true, true, true, ""},
 		"VerifyServerCert": {true, false, false, "certificate signed by unknown authority"},
 		"WithoutDomains":   {true, false, true, ""},
@@ -1808,15 +1835,15 @@ func TestVUIntegrationClientCerts(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					t.Parallel()
 					r.preInitState.Logger, _ = logtest.NewNullLogger()
-					initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
-					require.NoError(t, err)
 					ctx, cancel := context.WithCancel(context.Background())
 					defer cancel()
+					initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
+					require.NoError(t, err)
 					vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 					err = vu.RunOnce()
 					if len(data.errMsg) > 0 {
 						require.Error(t, err)
-						assert.Contains(t, err.Error(), data.errMsg)
+						assert.ErrorContains(t, err, data.errMsg)
 					} else {
 						require.NoError(t, err)
 					}
@@ -1979,10 +2006,10 @@ func TestArchiveRunningIntegrity(t *testing.T) {
 			err = r.Setup(ctx, ch)
 			cancel()
 			require.NoError(t, err)
-			initVU, err := r.NewVU(1, 1, ch)
-			require.NoError(t, err)
 			ctx, cancel = context.WithCancel(context.Background())
 			defer cancel()
+			initVU, err := r.NewVU(ctx, 1, 1, ch)
+			require.NoError(t, err)
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = vu.RunOnce()
 			require.NoError(t, err)
@@ -2061,11 +2088,12 @@ func TestStuffNotPanicking(t *testing.T) {
 		`))
 	require.NoError(t, err)
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	ch := make(chan metrics.SampleContainer, 1000)
-	initVU, err := r.NewVU(1, 1, ch)
+	initVU, err := r.NewVU(ctx, 1, 1, ch)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
 	vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 	errC := make(chan error)
 	go func() { errC <- vu.RunOnce() }()
@@ -2095,11 +2123,12 @@ func TestPanicOnSimpleHTML(t *testing.T) {
 		`)
 	require.NoError(t, err)
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	ch := make(chan metrics.SampleContainer, 1000)
-	initVU, err := r.NewVU(1, 1, ch)
+	initVU, err := r.NewVU(ctx, 1, 1, ch)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
 	vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 	errC := make(chan error)
 	go func() { errC <- vu.RunOnce() }()
@@ -2178,7 +2207,7 @@ func TestSystemTags(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			vu, err := r.NewVU(uint64(num), 0, samples)
+			vu, err := r.NewVU(ctx, uint64(num), 0, samples)
 			require.NoError(t, err)
 			activeVU := vu.Activate(&lib.VUActivationParams{
 				RunContext: ctx,
@@ -2230,7 +2259,10 @@ func TestVUPanic(t *testing.T) {
 		r := r
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			initVU, err := r.NewVU(1, 1234, make(chan metrics.SampleContainer, 100))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			initVU, err := r.NewVU(ctx, 1, 1234, make(chan metrics.SampleContainer, 100))
 			require.NoError(t, err)
 
 			logger := logrus.New()
@@ -2241,8 +2273,6 @@ func TestVUPanic(t *testing.T) {
 			}
 			logger.AddHook(&hook)
 
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			vu.(*ActiveVU).Runtime.Set("panic", func(str string) { panic(str) })
 			vu.(*ActiveVU).state.Logger = logger
@@ -2292,7 +2322,10 @@ func runMultiFileTestCase(t *testing.T, tc multiFileTestCase, tb *httpmultibin.H
 	options := runner.GetOptions()
 	require.Empty(t, options.Validate())
 
-	vu, err := runner.NewVU(1, 1, tc.samples)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	vu, err := runner.NewVU(ctx, 1, 1, tc.samples)
 	require.NoError(t, err)
 
 	jsVU, ok := vu.(*VU)
@@ -2300,8 +2333,6 @@ func runMultiFileTestCase(t *testing.T, tc multiFileTestCase, tb *httpmultibin.H
 	jsVU.state.Dialer = tb.Dialer
 	jsVU.state.TLSConfig = tb.TLSClientConfig
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	activeVU := vu.Activate(&lib.VUActivationParams{RunContext: ctx})
 
 	err = activeVU.RunOnce()
@@ -2324,7 +2355,7 @@ func runMultiFileTestCase(t *testing.T, tc multiFileTestCase, tb *httpmultibin.H
 			RuntimeOptions: tc.rtOpts,
 		}, arc)
 	require.NoError(t, err)
-	vuFromArc, err := runnerFromArc.NewVU(2, 2, tc.samples)
+	vuFromArc, err := runnerFromArc.NewVU(ctx, 2, 2, tc.samples)
 	require.NoError(t, err)
 	jsVUFromArc, ok := vuFromArc.(*VU)
 	require.True(t, ok)
@@ -2460,10 +2491,10 @@ func TestMinIterationDurationIsCancellable(t *testing.T) {
 	require.NoError(t, err)
 
 	ch := make(chan metrics.SampleContainer, 1000)
-	initVU, err := r.NewVU(1, 1, ch)
+	ctx, cancel := context.WithCancel(context.Background())
+	initVU, err := r.NewVU(ctx, 1, 1, ch)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
 	vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 	errC := make(chan error)
 	go func() { errC <- vu.RunOnce() }()
@@ -2480,8 +2511,8 @@ func TestMinIterationDurationIsCancellable(t *testing.T) {
 	}
 }
 
-//nolint:paralleltest
 func TestForceHTTP1Feature(t *testing.T) {
+	t.Parallel()
 	cases := map[string]struct {
 		godebug               string
 		expectedForceH1Result bool
@@ -2500,15 +2531,16 @@ func TestForceHTTP1Feature(t *testing.T) {
 	}
 
 	for name, tc := range cases {
+		name, tc := name, tc
 		t.Run(name, func(t *testing.T) {
-			err := os.Setenv("GODEBUG", tc.godebug)
-			require.NoError(t, err)
-			defer func() {
-				err = os.Unsetenv("GODEBUG")
-				require.NoError(t, err)
-			}()
-			assert.Equal(t, tc.expectedForceH1Result, forceHTTP1())
+			t.Parallel()
 
+			lookupEnv := func(key string) (string, bool) {
+				if key == "GODEBUG" {
+					return tc.godebug, true
+				}
+				return "", false
+			}
 			tb := httpmultibin.NewHTTPMultiBin(t)
 
 			data := fmt.Sprintf(`var k6 = require("k6");
@@ -2529,9 +2561,12 @@ func TestForceHTTP1Feature(t *testing.T) {
 
 			r1, err := getSimpleRunner(t, "/script.js", tb.Replacer.Replace(data))
 			require.NoError(t, err)
+			r1.preInitState.LookupEnv = lookupEnv
+
+			assert.Equal(t, tc.expectedForceH1Result, r1.forceHTTP1())
 
 			err = r1.SetOptions(lib.Options{
-				Hosts: tb.Dialer.Hosts,
+				Hosts: types.NullHosts{Trie: tb.Dialer.Hosts},
 				// We disable TLS verify so that we don't get a TLS handshake error since
 				// the certificates on the endpoint are not certified by a certificate authority
 				InsecureSkipTLSVerify: null.BoolFrom(true),
@@ -2548,16 +2583,19 @@ func TestForceHTTP1Feature(t *testing.T) {
 					Registry:       registry,
 				}, r1.MakeArchive())
 			require.NoError(t, err)
+			r2.preInitState.LookupEnv = lookupEnv
+			assert.Equal(t, tc.expectedForceH1Result, r2.forceHTTP1())
 
 			runners := map[string]*Runner{"Source": r1, "Archive": r2}
 			for name, r := range runners {
 				r := r
 				t.Run(name, func(t *testing.T) {
-					initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
-					require.NoError(t, err)
-
 					ctx, cancel := context.WithCancel(context.Background())
 					defer cancel()
+
+					initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
+					require.NoError(t, err)
+
 					vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 					err = vu.RunOnce()
 					require.NoError(t, err)
@@ -2635,7 +2673,11 @@ func TestExecutionInfo(t *testing.T) {
 
 			r.Bundle.Options.SystemTags = &metrics.DefaultSystemTagSet
 			samples := make(chan metrics.SampleContainer, 100)
-			initVU, err := r.NewVU(1, 10, samples)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			initVU, err := r.NewVU(ctx, 1, 10, samples)
 			require.NoError(t, err)
 
 			testRunState := &lib.TestRunState{
@@ -2644,11 +2686,8 @@ func TestExecutionInfo(t *testing.T) {
 				Runner:           r,
 			}
 
-			execScheduler, err := local.NewExecutionScheduler(testRunState)
+			execScheduler, err := execution.NewScheduler(testRunState)
 			require.NoError(t, err)
-
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
 
 			ctx = lib.WithExecutionState(ctx, execScheduler.GetState())
 			ctx = lib.WithScenarioState(ctx, &lib.ScenarioState{
@@ -2704,11 +2743,12 @@ exports.default = () => {
 		r := r
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			initVU, err := r.NewVU(1, 1, make(chan metrics.SampleContainer, 100))
-			require.NoError(t, err)
-
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+
+			initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
+			require.NoError(t, err)
+
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = vu.RunOnce()
 			require.NoError(t, err)
@@ -2720,4 +2760,36 @@ exports.default = () => {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestArchivingAnArchiveWorks(t *testing.T) {
+	t.Parallel()
+	r1, err := getSimpleRunner(t, "/script.js", `
+			exports.default = function() {}
+		`)
+	require.NoError(t, err)
+
+	arc := r1.MakeArchive()
+	registry := metrics.NewRegistry()
+	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
+	r2, err := NewFromArchive(
+		&lib.TestPreInitState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics,
+			Registry:       registry,
+		}, arc)
+	require.NoError(t, err)
+	require.NotNil(t, r2)
+
+	arc2 := r2.MakeArchive()
+	registry3 := metrics.NewRegistry()
+	builtinMetrics3 := metrics.RegisterBuiltinMetrics(registry)
+	r3, err := NewFromArchive(
+		&lib.TestPreInitState{
+			Logger:         testutils.NewLogger(t),
+			BuiltinMetrics: builtinMetrics3,
+			Registry:       registry3,
+		}, arc2)
+	require.NoError(t, err)
+	require.NotNil(t, r3)
 }

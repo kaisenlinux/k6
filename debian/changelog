@@ -1,3 +1,10 @@
+k6 (0.43.1-1kaisen) kaisen-packages; urgency=medium
+
+  * Import the 0.43.1 release
+  * Update the quilt patch
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Sun, 19 Mar 2023 19:11:43 +0100
+
 k6 (0.41.0-1kaisen) kaisen-packages; urgency=medium
 
   * Import the 0.41.0 release
