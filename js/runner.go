@@ -10,13 +10,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/dop251/goja"
-	"github.com/oxtoacart/bpool"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
 	"golang.org/x/net/http2"
 	"golang.org/x/time/rate"
@@ -54,8 +55,9 @@ type Runner struct {
 	RPSLimit       *rate.Limiter
 	RunTags        *metrics.TagSet
 
-	console   *console
-	setupData []byte
+	console    *console
+	setupData  []byte
+	BufferPool *lib.BufferPool
 }
 
 // New returns a new Runner for the provided source
@@ -99,6 +101,7 @@ func NewFromBundle(piState *lib.TestPreInitState, b *Bundle) (*Runner, error) {
 		Resolver: netext.NewResolver(
 			net.LookupIP, 0, defDNS.Select.DNSSelect, defDNS.Policy.DNSPolicy),
 		ActualResolver: net.LookupIP,
+		BufferPool:     lib.NewBufferPool(),
 	}
 
 	err = r.SetOptions(r.Bundle.Options)
@@ -224,7 +227,7 @@ func (r *Runner) newVU(
 		CookieJar:      cookieJar,
 		TLSConfig:      tlsConfig,
 		Console:        r.console,
-		BPool:          bpool.NewBufferPool(100),
+		BufferPool:     r.BufferPool,
 		Samples:        samplesOut,
 		scenarioIter:   make(map[string]uint64),
 	}
@@ -237,7 +240,7 @@ func (r *Runner) newVU(
 		TLSConfig:      vu.TLSConfig,
 		CookieJar:      cookieJar,
 		RPSLimit:       vu.Runner.RPSLimit,
-		BPool:          vu.BPool,
+		BufferPool:     vu.BufferPool,
 		VUID:           vu.ID,
 		VUIDGlobal:     vu.IDGlobal,
 		Samples:        vu.Samples,
@@ -252,7 +255,7 @@ func (r *Runner) newVU(
 	// instead of "Value is not an object: undefined  ..."
 	_ = vu.Runtime.GlobalObject().Set("open",
 		func() {
-			common.Throw(vu.Runtime, errors.New(openCantBeUsedOutsideInitContextMsg))
+			common.Throw(vu.Runtime, fmt.Errorf(cantBeUsedOutsideInitContextMsg, "open"))
 		})
 
 	return vu, nil
@@ -355,7 +358,7 @@ func (r *Runner) GetOptions() lib.Options {
 // IsExecutable returns whether the given name is an exported and
 // executable function in the script.
 func (r *Runner) IsExecutable(name string) bool {
-	_, exists := r.Bundle.exports[name]
+	_, exists := r.Bundle.callableExports[name]
 	return exists
 }
 
@@ -438,7 +441,13 @@ func (r *Runner) SetOptions(opts lib.Options) error {
 	// TODO: validate that all exec values are either nil or valid exported methods (or HTTP requests in the future)
 
 	if opts.ConsoleOutput.Valid {
-		c, err := newFileConsole(opts.ConsoleOutput.String, r.preInitState.Logger.Formatter)
+		// TODO: fix logger hack, see https://github.com/grafana/k6/issues/2958
+		// and https://github.com/grafana/k6/issues/2968
+		var formatter logrus.Formatter = &logrus.JSONFormatter{}
+		if l, ok := r.preInitState.Logger.(*logrus.Logger); ok { //nolint: forbidigo
+			formatter = l.Formatter
+		}
+		c, err := newFileConsole(opts.ConsoleOutput.String, formatter)
 		if err != nil {
 			return err
 		}
@@ -556,7 +565,26 @@ func (r *Runner) runPart(
 		// otherwise we have timeouted
 		return v, newTimeoutError(name, r.getTimeoutFor(name))
 	}
+
 	return v, err
+}
+
+//nolint:gochecknoglobals
+var gojaPromiseType = reflect.TypeOf((*goja.Promise)(nil))
+
+// unPromisify gets the result of v if it is a promise, otherwise returns v
+func unPromisify(v goja.Value) goja.Value {
+	if !common.IsNullish(v) {
+		if v.ExportType() == gojaPromiseType {
+			p, ok := v.Export().(*goja.Promise)
+			if !ok {
+				panic("Something that was promise did not export to a promise; this shouldn't happen")
+			}
+			return p.Result()
+		}
+	}
+
+	return v
 }
 
 // getTimeoutFor returns the timeout duration for given special script function.
@@ -585,8 +613,8 @@ type VU struct {
 	IDGlobal  uint64 // global across all instances
 	iteration int64
 
-	Console *console
-	BPool   *bpool.BufferPool
+	Console    *console
+	BufferPool *lib.BufferPool
 
 	Samples chan<- metrics.SampleContainer
 
@@ -824,6 +852,8 @@ func (u *VU) runFn(
 	u.state.Samples <- u.Dialer.GetTrail(
 		startTime, endTime, isFullIteration,
 		isDefault, u.state.Tags.GetCurrentValues(), u.Runner.preInitState.BuiltinMetrics)
+
+	v = unPromisify(v)
 
 	return v, isFullIteration, endTime.Sub(startTime), err
 }

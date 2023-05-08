@@ -9,12 +9,12 @@ import (
 	k6modules "go.k6.io/k6/js/modules"
 )
 
-const version = "0.8.0"
-
 type (
 	// RootModule is the global module instance that will create module
 	// instances for each VU.
-	RootModule struct{}
+	RootModule struct {
+		PidRegistry *pidRegistry
+	}
 
 	// JSModule exposes the properties available to the JS script.
 	JSModule struct {
@@ -36,17 +36,21 @@ var (
 
 // New returns a pointer to a new RootModule instance.
 func New() *RootModule {
-	return &RootModule{}
+	return &RootModule{
+		PidRegistry: &pidRegistry{},
+	}
 }
 
 // NewModuleInstance implements the k6modules.Module interface to return
 // a new instance for each VU.
-func (*RootModule) NewModuleInstance(vu k6modules.VU) k6modules.Instance {
+func (m *RootModule) NewModuleInstance(vu k6modules.VU) k6modules.Instance {
 	return &ModuleInstance{
 		mod: &JSModule{
-			Chromium: mapBrowserToGoja(moduleVU{vu}),
-			Devices:  common.GetDevices(),
-			Version:  version,
+			Chromium: mapBrowserToGoja(moduleVU{
+				VU:          vu,
+				pidRegistry: m.PidRegistry,
+			}),
+			Devices: common.GetDevices(),
 		},
 	}
 }

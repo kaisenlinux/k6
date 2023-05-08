@@ -88,6 +88,13 @@ func (mi *K6) RandomSeed(seed int64) {
 	mi.vu.Runtime().SetRandSource(randSource)
 }
 
+func isAsyncFunction(rt *goja.Runtime, val goja.Value) bool {
+	if common.IsNullish(val) {
+		return false
+	}
+	return val.ToObject(rt).Get("constructor").ToObject(rt).Get("name").String() == "AsyncFunction"
+}
+
 // Group wraps a function call and executes it within the provided group name.
 func (mi *K6) Group(name string, val goja.Value) (goja.Value, error) {
 	state := mi.vu.State()
@@ -95,16 +102,14 @@ func (mi *K6) Group(name string, val goja.Value) (goja.Value, error) {
 		return nil, ErrGroupInInitContext
 	}
 
-	if isNullish(val) {
+	if common.IsNullish(val) {
 		return nil, errors.New("group() requires a callback as a second argument")
 	}
 	fn, ok := goja.AssertFunction(val)
 	if !ok {
 		return nil, errors.New("group() requires a callback as a second argument")
 	}
-	rt := mi.vu.Runtime()
-	o := val.ToObject(rt)
-	if o.ClassName() == "AsyncFunction" {
+	if isAsyncFunction(mi.vu.Runtime(), val) {
 		return goja.Undefined(), fmt.Errorf(asyncFunctionNotSupportedMsg, "group")
 	}
 	g, err := state.Group.Group(name)
@@ -149,10 +154,6 @@ func (mi *K6) Group(name string, val goja.Value) (goja.Value, error) {
 	return ret, err
 }
 
-func isNullish(val goja.Value) bool {
-	return val == nil || goja.IsNull(val) || goja.IsUndefined(val)
-}
-
 // Check will emit check metrics for the provided checks.
 //
 //nolint:cyclop
@@ -193,7 +194,7 @@ func (mi *K6) Check(arg0, checks goja.Value, extras ...goja.Value) (bool, error)
 			tags = tags.With("check", check.Name)
 		}
 
-		if !isNullish(val) && val.ToObject(rt).ClassName() == "AsyncFunction" {
+		if isAsyncFunction(rt, val) {
 			return false, fmt.Errorf(asyncFunctionNotSupportedMsg, "check")
 		}
 
@@ -206,6 +207,11 @@ func (mi *K6) Check(arg0, checks goja.Value, extras ...goja.Value) (bool, error)
 				val = rt.ToValue(false)
 				exc = err
 			}
+		}
+		booleanVal := val.ToBoolean()
+		if !booleanVal {
+			// A single failure makes the return value false.
+			succ = false
 		}
 
 		// Emit! (But only if we have a valid context.)
@@ -221,20 +227,18 @@ func (mi *K6) Check(arg0, checks goja.Value, extras ...goja.Value) (bool, error)
 				Metadata: commonTagsAndMeta.Metadata,
 				Value:    0,
 			}
-			if val.ToBoolean() {
+			if booleanVal {
 				atomic.AddInt64(&check.Passes, 1)
 				sample.Value = 1
 			} else {
 				atomic.AddInt64(&check.Fails, 1)
-
-				// A single failure makes the return value false.
-				succ = false
 			}
+
 			metrics.PushIfNotDone(ctx, state.Samples, sample)
 		}
 
 		if exc != nil {
-			return succ, exc
+			return false, exc
 		}
 	}
 

@@ -2,10 +2,12 @@ package tracing
 
 import (
 	"fmt"
+	"math/rand"
 	"net/http"
 	"time"
 
 	"github.com/dop251/goja"
+	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
 	httpmodule "go.k6.io/k6/js/modules/k6/http"
 	"go.k6.io/k6/metrics"
@@ -35,12 +37,19 @@ type Client struct {
 	// uses it under the hood to emit the requests it
 	// instruments.
 	asyncRequestFunc HTTPAsyncRequestFunc
+
+	// randSource holds the client's random source, used
+	// to generate random values for the trace ID.
+	randSource *rand.Rand
 }
 
-// HTTPRequestFunc is a type alias representing the prototype of
-// k6's http module's request function
 type (
-	HTTPRequestFunc      func(method string, url goja.Value, args ...goja.Value) (*httpmodule.Response, error)
+	// HTTPRequestFunc is a type alias representing the prototype of
+	// k6's http module's request function
+	HTTPRequestFunc func(method string, url goja.Value, args ...goja.Value) (*httpmodule.Response, error)
+
+	// HTTPAsyncRequestFunc is a type alias representing the prototype of
+	// k6's http module's asyncRequest function
 	HTTPAsyncRequestFunc func(method string, url goja.Value, args ...goja.Value) (*goja.Promise, error)
 )
 
@@ -62,6 +71,7 @@ func NewClient(vu modules.VU, opts options) (*Client, error) {
 		return nil,
 			fmt.Errorf("failed initializing tracing client, unable to require http.request method; reason: %w", err)
 	}
+
 	// Export the http module's syncRequest function goja.Callable as a Go function
 	var asyncRequestFunc HTTPAsyncRequestFunc
 	if err := rt.ExportTo(httpModuleObject.Get("asyncRequest"), &asyncRequestFunc); err != nil {
@@ -70,7 +80,13 @@ func NewClient(vu modules.VU, opts options) (*Client, error) {
 				err)
 	}
 
-	client := &Client{vu: vu, requestFunc: requestFunc, asyncRequestFunc: asyncRequestFunc}
+	client := &Client{
+		vu:               vu,
+		requestFunc:      requestFunc,
+		asyncRequestFunc: asyncRequestFunc,
+		randSource:       rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
+	}
+
 	if err := client.Configure(opts); err != nil {
 		return nil,
 			fmt.Errorf("failed initializing tracing client, invalid configuration; reason: %w", err)
@@ -85,11 +101,16 @@ func (c *Client) Configure(opts options) error {
 		return fmt.Errorf("invalid options: %w", err)
 	}
 
+	var sampler Sampler = NewAlwaysOnSampler()
+	if opts.Sampling != 1.0 {
+		sampler = NewProbabilisticSampler(opts.Sampling)
+	}
+
 	switch opts.Propagator {
 	case "w3c":
-		c.propagator = &W3CPropagator{}
+		c.propagator = NewW3CPropagator(sampler)
 	case "jaeger":
-		c.propagator = &JaegerPropagator{}
+		c.propagator = NewJaegerPropagator(sampler)
 	default:
 		return fmt.Errorf("unknown propagator: %s", opts.Propagator)
 	}
@@ -99,31 +120,11 @@ func (c *Client) Configure(opts options) error {
 	return nil
 }
 
-func (c *Client) generateTraceContext() (http.Header, string, error) {
-	traceID := TraceID{
-		Prefix: k6Prefix,
-		Code:   k6CloudCode,
-		Time:   time.Now(),
-	}
-
-	encodedTraceID, err := traceID.Encode()
-	if err != nil {
-		return http.Header{}, "", fmt.Errorf("failed to encode the generated trace ID; reason: %w", err)
-	}
-
-	// Produce a trace header in the format defined by the configured propagator.
-	traceContextHeader, err := c.propagator.Propagate(encodedTraceID)
-	if err != nil {
-		return http.Header{}, "", fmt.Errorf("failed to propagate trace ID; reason: %w", err)
-	}
-
-	return traceContextHeader, encodedTraceID, nil
-}
-
 // Request instruments the http module's request function with tracing headers,
 // and ensures the trace_id is emitted as part of the output's data points metadata.
 func (c *Client) Request(method string, url goja.Value, args ...goja.Value) (*httpmodule.Response, error) {
 	var result *httpmodule.Response
+
 	var err error
 	err = c.instrumentedCall(func(args ...goja.Value) error {
 		result, err = c.requestFunc(method, url, args...)
@@ -150,37 +151,6 @@ func (c *Client) AsyncRequest(method string, url goja.Value, args ...goja.Value)
 		return nil, err
 	}
 	return result, nil
-}
-
-func (c *Client) instrumentedCall(call func(args ...goja.Value) error, args ...goja.Value) error {
-	if len(args) == 0 {
-		args = []goja.Value{goja.Null()}
-	}
-
-	traceContextHeader, encodedTraceID, err := c.generateTraceContext()
-	if err != nil {
-		return err
-	}
-	// update the `params` argument with the trace context header
-	// so that it can be used by the http module's request function.
-	args, err = c.instrumentArguments(traceContextHeader, args...)
-	if err != nil {
-		return fmt.Errorf("failed to instrument request arguments; reason: %w", err)
-	}
-
-	// Add the trace ID to the VU's state, so that it can be
-	// used in the metrics emitted by the HTTP module.
-	c.vu.State().Tags.Modify(func(t *metrics.TagsAndMeta) {
-		t.SetMetadata(metadataTraceIDKeyName, encodedTraceID)
-	})
-	// Remove the trace ID from the VU's state, so that it doesn't leak into other requests.
-	defer func() {
-		c.vu.State().Tags.Modify(func(t *metrics.TagsAndMeta) {
-			t.DeleteMetadata(metadataTraceIDKeyName)
-		})
-	}()
-
-	return call(args...)
 }
 
 // Del instruments the http module's delete method.
@@ -224,6 +194,61 @@ func (c *Client) Put(url goja.Value, args ...goja.Value) (*httpmodule.Response, 
 	return c.Request(http.MethodPut, url, args...)
 }
 
+func (c *Client) instrumentedCall(call func(args ...goja.Value) error, args ...goja.Value) error {
+	if len(args) == 0 {
+		args = []goja.Value{goja.Null()}
+	}
+
+	traceContextHeader, encodedTraceID, err := c.generateTraceContext()
+	if err != nil {
+		return err
+	}
+
+	// update the `params` argument with the trace context header
+	// so that it can be used by the http module's request function.
+	args, err = c.instrumentArguments(traceContextHeader, args...)
+	if err != nil {
+		return fmt.Errorf("failed to instrument request arguments; reason: %w", err)
+	}
+
+	// Add the trace ID to the VU's state, so that it can be
+	// used in the metrics emitted by the HTTP module.
+	c.vu.State().Tags.Modify(func(t *metrics.TagsAndMeta) {
+		t.SetMetadata(metadataTraceIDKeyName, encodedTraceID)
+	})
+
+	// Remove the trace ID from the VU's state, so that it doesn't leak into other requests.
+	defer func() {
+		c.vu.State().Tags.Modify(func(t *metrics.TagsAndMeta) {
+			t.DeleteMetadata(metadataTraceIDKeyName)
+		})
+	}()
+
+	return call(args...)
+}
+
+func (c *Client) generateTraceContext() (http.Header, string, error) {
+	traceID := TraceID{
+		Prefix:     k6Prefix,
+		Code:       k6CloudCode,
+		Time:       time.Now(),
+		randSource: c.randSource,
+	}
+
+	encodedTraceID, err := traceID.Encode()
+	if err != nil {
+		return http.Header{}, "", fmt.Errorf("failed to encode the generated trace ID; reason: %w", err)
+	}
+
+	// Produce a trace header in the format defined by the configured propagator.
+	traceContextHeader, err := c.propagator.Propagate(encodedTraceID)
+	if err != nil {
+		return http.Header{}, "", fmt.Errorf("failed to propagate trace ID; reason: %w", err)
+	}
+
+	return traceContextHeader, encodedTraceID, nil
+}
+
 // instrumentArguments: expects args to be in the format expected by the
 // request method (body, params)
 func (c *Client) instrumentArguments(traceContext http.Header, args ...goja.Value) ([]goja.Value, error) {
@@ -236,7 +261,7 @@ func (c *Client) instrumentArguments(traceContext http.Header, args ...goja.Valu
 		// We received both a body and a params argument. In the
 		// event params would be nullish, we'll instantiate
 		// a new object.
-		if isNullish(args[1]) {
+		if common.IsNullish(args[1]) {
 			paramsObj = rt.NewObject()
 			args[1] = paramsObj
 		} else {
@@ -253,7 +278,7 @@ func (c *Client) instrumentArguments(traceContext http.Header, args ...goja.Valu
 	headersObj := rt.NewObject()
 
 	headersValue := paramsObj.Get("headers")
-	if !isNullish(headersValue) {
+	if !common.IsNullish(headersValue) {
 		headersObj = headersValue.ToObject(rt)
 	}
 

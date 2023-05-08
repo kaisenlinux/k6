@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"net/http"
 	"time"
@@ -23,7 +22,7 @@ const (
 	k6IdempotencyKeyHeader = "k6-Idempotency-Key"
 )
 
-// Client handles communication with Load Impact cloud API.
+// Client handles communication with the k6 Cloud API.
 type Client struct {
 	client  *http.Client
 	token   string
@@ -76,7 +75,7 @@ func (c *Client) NewRequest(method, url string, data interface{}) (*http.Request
 
 func (c *Client) Do(req *http.Request, v interface{}) error {
 	if req.Body != nil && req.GetBody == nil {
-		originalBody, err := ioutil.ReadAll(req.Body)
+		originalBody, err := io.ReadAll(req.Body)
 		if err != nil {
 			return err
 		}
@@ -85,7 +84,7 @@ func (c *Client) Do(req *http.Request, v interface{}) error {
 		}
 
 		req.GetBody = func() (io.ReadCloser, error) {
-			return ioutil.NopCloser(bytes.NewReader(originalBody)), nil
+			return io.NopCloser(bytes.NewReader(originalBody)), nil
 		}
 		req.Body, _ = req.GetBody()
 	}
@@ -160,14 +159,14 @@ func (c *Client) do(req *http.Request, v interface{}, attempt int) (retry bool, 
 
 func checkResponse(r *http.Response) error {
 	if r == nil {
-		return ErrUnknown
+		return errUnknown
 	}
 
 	if c := r.StatusCode; c >= 200 && c <= 299 {
 		return nil
 	}
 
-	data, err := ioutil.ReadAll(r.Body)
+	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		return err
 	}
@@ -177,10 +176,10 @@ func checkResponse(r *http.Response) error {
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
 		if r.StatusCode == http.StatusUnauthorized {
-			return ErrNotAuthenticated
+			return errNotAuthenticated
 		}
 		if r.StatusCode == http.StatusForbidden {
-			return ErrNotAuthorized
+			return errNotAuthorized
 		}
 		return fmt.Errorf(
 			"unexpected HTTP error from %s: %d %s",
@@ -220,6 +219,7 @@ func shouldAddIdempotencyKey(req *http.Request) bool {
 
 // randomStrHex returns a hex string which can be used
 // for session token id or idempotency key.
+//
 //nolint:gosec
 func randomStrHex() string {
 	// 16 hex characters

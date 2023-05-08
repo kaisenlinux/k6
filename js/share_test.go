@@ -2,7 +2,7 @@ package js
 
 import (
 	"context"
-	"io/ioutil"
+	"io"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -49,11 +49,11 @@ exports.default = function() {
 
 	logger := logrus.New()
 	logger.SetLevel(logrus.InfoLevel)
-	logger.Out = ioutil.Discard
-	hook := testutils.SimpleLogrusHook{
-		HookedLevels: []logrus.Level{logrus.InfoLevel, logrus.ErrorLevel, logrus.FatalLevel, logrus.PanicLevel},
-	}
-	logger.AddHook(&hook)
+	logger.Out = io.Discard
+	hook := testutils.NewLogHook(
+		logrus.InfoLevel, logrus.ErrorLevel, logrus.FatalLevel, logrus.PanicLevel,
+	)
+	logger.AddHook(hook)
 
 	r1, err := getSimpleRunner(t, "/script.js", data, logger)
 	require.NoError(t, err)

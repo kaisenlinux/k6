@@ -3,7 +3,7 @@ package js
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
-	"github.com/oxtoacart/bpool"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
@@ -25,7 +24,7 @@ import (
 	"go.k6.io/k6/metrics"
 )
 
-func TestInitContextRequire(t *testing.T) {
+func TestRequire(t *testing.T) {
 	t.Parallel()
 	t.Run("Modules", func(t *testing.T) {
 		t.Run("Nonexistent", func(t *testing.T) {
@@ -48,13 +47,11 @@ func TestInitContextRequire(t *testing.T) {
 			bi, err := b.Instantiate(context.Background(), 0)
 			assert.NoError(t, err, "instance error")
 
-			exports := bi.pgm.exports
-			require.NotNil(t, exports)
-			_, defaultOk := goja.AssertFunction(exports.Get("default"))
+			_, defaultOk := goja.AssertFunction(bi.getExported("default"))
 			assert.True(t, defaultOk, "default export is not a function")
-			assert.Equal(t, "abc123", exports.Get("dummy").String())
+			assert.Equal(t, "abc123", bi.getExported("dummy").String())
 
-			k6 := exports.Get("_k6").ToObject(bi.Runtime)
+			k6 := bi.getExported("_k6").ToObject(bi.Runtime)
 			require.NotNil(t, k6)
 			_, groupOk := goja.AssertFunction(k6.Get("group"))
 			assert.True(t, groupOk, "k6.group is not a function")
@@ -73,13 +70,11 @@ func TestInitContextRequire(t *testing.T) {
 			bi, err := b.Instantiate(context.Background(), 0)
 			require.NoError(t, err)
 
-			exports := bi.pgm.exports
-			require.NotNil(t, exports)
-			_, defaultOk := goja.AssertFunction(exports.Get("default"))
+			_, defaultOk := goja.AssertFunction(bi.getExported("default"))
 			assert.True(t, defaultOk, "default export is not a function")
-			assert.Equal(t, "abc123", exports.Get("dummy").String())
+			assert.Equal(t, "abc123", bi.getExported("dummy").String())
 
-			_, groupOk := goja.AssertFunction(exports.Get("_group"))
+			_, groupOk := goja.AssertFunction(bi.getExported("_group"))
 			assert.True(t, groupOk, "{ group } is not a function")
 		})
 	})
@@ -107,7 +102,7 @@ func TestInitContextRequire(t *testing.T) {
 			require.NoError(t, afero.WriteFile(fs, "/file.js", []byte(`throw new Error("aaaa")`), 0o755))
 			_, err := getSimpleBundle(t, "/script.js", `import "/file.js"; export default function() {}`, fs)
 			assert.EqualError(t, err,
-				"Error: aaaa\n\tat file:///file.js:2:7(3)\n\tat go.k6.io/k6/js.(*InitContext).Require-fm (native)\n\tat file:///script.js:1:0(15)\n")
+				"Error: aaaa\n\tat file:///file.js:2:7(3)\n\tat go.k6.io/k6/js.(*requireImpl).require-fm (native)\n\tat file:///script.js:1:0(15)\n")
 		})
 
 		imports := map[string]struct {
@@ -175,9 +170,6 @@ func TestInitContextRequire(t *testing.T) {
 							libName)
 						b, err := getSimpleBundle(t, "/path/to/script.js", data, fs)
 						require.NoError(t, err)
-						if constPath != "" {
-							assert.Contains(t, b.BaseInitContext.programs, "file://"+constPath)
-						}
 
 						_, err = b.Instantiate(context.Background(), 0)
 						require.NoError(t, err)
@@ -355,7 +347,7 @@ func TestRequestWithBinaryFile(t *testing.T) {
 
 	logger := logrus.New()
 	logger.Level = logrus.DebugLevel
-	logger.Out = ioutil.Discard
+	logger.Out = io.Discard
 
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
@@ -373,7 +365,7 @@ func TestRequestWithBinaryFile(t *testing.T) {
 				netext.NewResolver(net.LookupIP, 0, types.DNSfirst, types.DNSpreferIPv4),
 			)).DialContext,
 		},
-		BPool:          bpool.NewBufferPool(1),
+		BufferPool:     lib.NewBufferPool(),
 		Samples:        make(chan metrics.SampleContainer, 500),
 		BuiltinMetrics: builtinMetrics,
 		Tags:           lib.NewVUStateTags(registry.RootTagSet()),
@@ -502,7 +494,7 @@ func TestRequestWithMultipleBinaryFiles(t *testing.T) {
 
 	logger := logrus.New()
 	logger.Level = logrus.DebugLevel
-	logger.Out = ioutil.Discard
+	logger.Out = io.Discard
 
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
@@ -520,7 +512,7 @@ func TestRequestWithMultipleBinaryFiles(t *testing.T) {
 				netext.NewResolver(net.LookupIP, 0, types.DNSfirst, types.DNSpreferIPv4),
 			)).DialContext,
 		},
-		BPool:          bpool.NewBufferPool(1),
+		BufferPool:     lib.NewBufferPool(),
 		Samples:        make(chan metrics.SampleContainer, 500),
 		BuiltinMetrics: builtinMetrics,
 		Tags:           lib.NewVUStateTags(registry.RootTagSet()),
@@ -538,7 +530,7 @@ func TestRequestWithMultipleBinaryFiles(t *testing.T) {
 	<-ch
 }
 
-func TestInitContextVU(t *testing.T) {
+func Test__VU(t *testing.T) {
 	t.Parallel()
 	b, err := getSimpleBundle(t, "/script.js", `
 		let vu = __VU;

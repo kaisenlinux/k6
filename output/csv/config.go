@@ -22,13 +22,18 @@ type Config struct {
 }
 
 // TimeFormat custom enum type
+//
 //go:generate enumer -type=TimeFormat -transform=snake -trimprefix TimeFormat -output time_format_gen.go
 type TimeFormat uint8
 
 // valid defined values for TimeFormat
 const (
 	TimeFormatUnix TimeFormat = iota
+	TimeFormatUnixMilli
+	TimeFormatUnixMicro
+	TimeFormatUnixNano
 	TimeFormatRFC3339
+	TimeFormatRFC3339Nano
 )
 
 // NewConfig creates a new Config instance with default values for some fields.
@@ -55,7 +60,7 @@ func (c Config) Apply(cfg Config) Config {
 }
 
 // ParseArg takes an arg string and converts it to a config
-func ParseArg(arg string, logger *logrus.Logger) (Config, error) {
+func ParseArg(arg string, logger logrus.FieldLogger) (Config, error) {
 	c := NewConfig()
 
 	if !strings.Contains(arg, "=") {
@@ -97,7 +102,7 @@ func ParseArg(arg string, logger *logrus.Logger) (Config, error) {
 // GetConsolidatedConfig combines {default config values + JSON config +
 // environment vars + arg config values}, and returns the final result.
 func GetConsolidatedConfig(
-	jsonRawConf json.RawMessage, env map[string]string, arg string, logger *logrus.Logger,
+	jsonRawConf json.RawMessage, env map[string]string, arg string, logger logrus.FieldLogger,
 ) (Config, error) {
 	result := NewConfig()
 	if jsonRawConf != nil {

@@ -28,6 +28,8 @@ func (bt *blockingTransport) RoundTrip(req *http.Request) (*http.Response, error
 // Main is a TestMain function that can be imported by other test packages that
 // want to use the blocking transport and other features useful for integration
 // tests.
+//
+//nolint:forbidigo
 func Main(m *testing.M) {
 	exitCode := 1 // error out by default
 	defer func() {
@@ -46,17 +48,14 @@ func Main(m *testing.M) {
 	http.DefaultTransport = bt
 	defer func() {
 		if bt.counter > 0 {
-			fmt.Printf("Expected blocking transport count to be 0 but was %d\n", bt.counter) //nolint:forbidigo
+			fmt.Printf("Expected blocking transport count to be 0 but was %d\n", bt.counter)
 			exitCode = 2
 		}
 	}()
 
 	defer func() {
-		// TODO: figure out why logrus' `Entry.WriterLevel` goroutine sticks
-		// around and remove this exception.
-		opt := goleak.IgnoreTopFunction("io.(*pipe).read")
-		if err := goleak.Find(opt); err != nil {
-			fmt.Println(err) //nolint:forbidigo
+		if err := goleak.Find(); err != nil {
+			fmt.Println(err)
 			exitCode = 3
 		}
 	}()

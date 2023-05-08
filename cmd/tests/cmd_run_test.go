@@ -64,6 +64,63 @@ func TestSimpleTestStdin(t *testing.T) {
 	assert.Empty(t, ts.LoggerHook.Drain())
 }
 
+func TestBinaryNameStdout(t *testing.T) {
+	t.Parallel()
+
+	ts := NewGlobalTestState(t)
+	ts.BinaryName = "customBinaryName"
+	ts.CmdArgs = []string{ts.BinaryName}
+	cmd.ExecuteWithGlobalState(ts.GlobalState)
+
+	stdout := ts.Stdout.String()
+	assert.Contains(t, stdout, fmt.Sprintf("%s [command]", ts.BinaryName))
+	assert.Empty(t, ts.Stderr.Bytes())
+	assert.Empty(t, ts.LoggerHook.Drain())
+}
+
+func TestBinaryNameHelpStdout(t *testing.T) {
+	t.Parallel()
+	ts := NewGlobalTestState(t)
+	ts.BinaryName = "customBinaryName"
+
+	tests := []struct {
+		cmdName        string
+		extraCmd       string // For the `login cloud` cmd
+		containsOutput string
+	}{
+		{
+			cmdName:        "archive",
+			containsOutput: fmt.Sprintf("%s archive -u 10 -d 10s -O myarchive.tar script.js", ts.BinaryName),
+		},
+		{
+			cmdName:        "cloud",
+			containsOutput: fmt.Sprintf("%s cloud script.js", ts.BinaryName),
+		},
+		{
+			cmdName:        "convert",
+			containsOutput: fmt.Sprintf("%s convert -O har-session.js session.har", ts.BinaryName),
+		},
+		{
+			cmdName:        "login",
+			extraCmd:       "cloud",
+			containsOutput: fmt.Sprintf("%s login cloud -t YOUR_TOKEN", ts.BinaryName),
+		},
+		{
+			cmdName:        "run",
+			containsOutput: fmt.Sprintf("%s run -i 10 script.js", ts.BinaryName),
+		},
+	}
+
+	for _, tt := range tests {
+		ts.CmdArgs = []string{ts.BinaryName, "help", tt.cmdName, tt.extraCmd}
+		cmd.ExecuteWithGlobalState(ts.GlobalState)
+		stdout := ts.Stdout.String()
+		assert.Contains(t, stdout, tt.containsOutput)
+		assert.Empty(t, ts.Stderr.Bytes())
+		assert.Empty(t, ts.LoggerHook.Drain())
+	}
+}
+
 // TODO: Remove this? It doesn't test anything AFAICT...
 func TestStdoutAndStderrAreEmptyWithQuietAndHandleSummary(t *testing.T) {
 	t.Parallel()
@@ -170,13 +227,13 @@ func TestWrongEnvVarIterations(t *testing.T) {
 	assert.Empty(t, ts.LoggerHook.Drain())
 }
 
-func getSingleFileTestState(t *testing.T, script string, cliFlags []string, expExitCode exitcodes.ExitCode) *GlobalTestState {
+func getSingleFileTestState(tb testing.TB, script string, cliFlags []string, expExitCode exitcodes.ExitCode) *GlobalTestState {
 	if cliFlags == nil {
 		cliFlags = []string{"-v", "--log-output=stdout"}
 	}
 
-	ts := NewGlobalTestState(t)
-	require.NoError(t, afero.WriteFile(ts.FS, filepath.Join(ts.Cwd, "test.js"), []byte(script), 0o644))
+	ts := NewGlobalTestState(tb)
+	require.NoError(tb, afero.WriteFile(ts.FS, filepath.Join(ts.Cwd, "test.js"), []byte(script), 0o644))
 	ts.CmdArgs = append(append([]string{"k6", "run"}, cliFlags...), "test.js")
 	ts.ExpectedExitCode = int(expExitCode)
 
@@ -406,12 +463,12 @@ func TestSubMetricThresholdNoData(t *testing.T) {
      two..................: 42`)
 }
 
-func getTestServer(t *testing.T, routes map[string]http.Handler) *httptest.Server {
+func getTestServer(tb testing.TB, routes map[string]http.Handler) *httptest.Server {
 	mux := http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		for methodAndRoute, handler := range routes {
 			methodRouteTuple := strings.SplitN(methodAndRoute, " ", 2)
 			regex, err := regexp.Compile(methodRouteTuple[1])
-			require.NoError(t, err)
+			require.NoError(tb, err)
 
 			if req.Method == methodRouteTuple[0] && regex.Match([]byte(req.URL.String())) {
 				handler.ServeHTTP(resp, req)
@@ -426,46 +483,46 @@ func getTestServer(t *testing.T, routes map[string]http.Handler) *httptest.Serve
 }
 
 func getCloudTestEndChecker(
-	t *testing.T, testRunID int,
+	tb testing.TB, testRunID int,
 	testStart http.Handler, expRunStatus cloudapi.RunStatus, expResultStatus cloudapi.ResultStatus,
 ) *httptest.Server {
 	testFinished := false
 
 	if testStart == nil {
-		testStart = cloudTestStartSimple(t, testRunID)
+		testStart = cloudTestStartSimple(tb, testRunID)
 	}
 
-	srv := getTestServer(t, map[string]http.Handler{
+	srv := getTestServer(tb, map[string]http.Handler{
 		"POST ^/v1/tests$": testStart,
 		fmt.Sprintf("POST ^/v1/tests/%d$", testRunID): http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
-			require.NotNil(t, req.Body)
+			require.NotNil(tb, req.Body)
 			buf := &bytes.Buffer{}
 			_, err := io.Copy(buf, req.Body)
-			require.NoError(t, err)
-			require.NoError(t, req.Body.Close())
+			require.NoError(tb, err)
+			require.NoError(tb, req.Body.Close())
 
 			body := buf.Bytes()
-			require.True(t, gjson.ValidBytes(body))
+			require.True(tb, gjson.ValidBytes(body))
 
 			runStatus := gjson.GetBytes(body, "run_status")
-			require.True(t, runStatus.Exists()) // important to check, since run_status can be 0
+			require.True(tb, runStatus.Exists()) // important to check, since run_status can be 0
 			assert.Equalf(
-				t, expRunStatus, cloudapi.RunStatus(runStatus.Int()),
+				tb, expRunStatus, cloudapi.RunStatus(runStatus.Int()),
 				"received wrong run_status value",
 			)
 
 			resultStatus := gjson.GetBytes(body, "result_status")
-			require.True(t, resultStatus.Exists())
+			require.True(tb, resultStatus.Exists())
 			assert.Equalf(
-				t, expResultStatus, cloudapi.ResultStatus(resultStatus.Int()),
+				tb, expResultStatus, cloudapi.ResultStatus(resultStatus.Int()),
 				"received wrong result_status value",
 			)
 			testFinished = true
 		}),
 	})
 
-	t.Cleanup(func() {
-		assert.Truef(t, testFinished, "expected test to have called the cloud API endpoint to finish the test")
+	tb.Cleanup(func() {
+		assert.Truef(tb, testFinished, "expected test to have called the cloud API endpoint to finish the test")
 		srv.Close()
 	})
 
@@ -473,7 +530,7 @@ func getCloudTestEndChecker(
 }
 
 func getSimpleCloudOutputTestState(
-	t *testing.T, script string, cliFlags []string,
+	tb testing.TB, script string, cliFlags []string,
 	expRunStatus cloudapi.RunStatus, expResultStatus cloudapi.ResultStatus, expExitCode exitcodes.ExitCode,
 ) *GlobalTestState {
 	if cliFlags == nil {
@@ -481,8 +538,8 @@ func getSimpleCloudOutputTestState(
 	}
 	cliFlags = append(cliFlags, "--out", "cloud")
 
-	srv := getCloudTestEndChecker(t, 111, nil, expRunStatus, expResultStatus)
-	ts := getSingleFileTestState(t, script, cliFlags, expExitCode)
+	srv := getCloudTestEndChecker(tb, 111, nil, expRunStatus, expResultStatus)
+	ts := getSingleFileTestState(tb, script, cliFlags, expExitCode)
 	ts.Env["K6_CLOUD_HOST"] = srv.URL
 	return ts
 }
@@ -1659,11 +1716,9 @@ func TestPrometheusRemoteWriteOutput(t *testing.T) {
 	t.Parallel()
 
 	ts := NewGlobalTestState(t)
+	ts.Env["K6_PROMETHEUS_RW_SERVER_URL"] = "http://a-fake-url-for-fail"
 	ts.CmdArgs = []string{"k6", "run", "--out", "experimental-prometheus-rw", "-"}
-	ts.Stdin = bytes.NewBufferString(`
-		import exec from 'k6/execution';
-		export default function () {};
-	`)
+	ts.Stdin = bytes.NewBufferString(`export default function () {};`)
 
 	cmd.ExecuteWithGlobalState(ts.GlobalState)
 	ts.OutMutex.Lock()
@@ -1671,6 +1726,48 @@ func TestPrometheusRemoteWriteOutput(t *testing.T) {
 	ts.OutMutex.Unlock()
 
 	assert.Contains(t, stdout, "output: Prometheus remote write")
+}
+
+func BenchmarkReadResponseBody(b *testing.B) {
+	httpSrv := httpmultibin.NewHTTPMultiBin(b)
+
+	script := httpSrv.Replacer.Replace(`
+		import http from "k6/http";
+		import { check, sleep } from "k6";
+
+		let statusCheck = { "status is 200": (r) => r.status === 200 }
+
+		export let options = {
+			duration: '10s',
+			vus: 10
+		};
+		
+		export default function () {
+			let bytes = randomIntBetween(100 * 1024, 5 * 1024 * 1024)
+
+			let response = http.get(http.url` + "`HTTPBIN_IP_URL/bytes/${bytes}`" + `)
+			check(response, statusCheck)
+
+			let responses = http.batch([
+										["GET", http.url` + "`HTTPBIN_IP_URL/stream-bytes/${bytes}`" + `],
+										["GET", http.url` + "`HTTPBIN_IP_URL/stream-bytes/${bytes}`" + `],
+										["GET", http.url` + "`HTTPBIN_IP_URL/bytes/${bytes}`" + `],
+										["GET", http.url` + "`HTTPBIN_IP_URL/bytes/${bytes}`" + `],
+										["GET", http.url` + "`HTTPBIN_IP_URL/gzip`" + `],
+										["GET", http.url` + "`HTTPBIN_IP_URL/deflate`" + `],
+										["GET", http.url` + "`HTTPBIN_IP_URL/image/jpeg`" + `],
+									]);
+			responses.forEach(res => check(res, statusCheck))
+			sleep(0.1)
+		};
+		
+		function randomIntBetween(min, max) {
+			return Math.floor(Math.random() * (max - min + 1) + min);
+		}
+	`)
+
+	ts := getSimpleCloudOutputTestState(b, script, nil, cloudapi.RunStatusFinished, cloudapi.ResultStatusPassed, 0)
+	cmd.ExecuteWithGlobalState(ts.GlobalState)
 }
 
 func TestBrowserPermissions(t *testing.T) {
@@ -1777,6 +1874,73 @@ func TestUIRenderOutput(t *testing.T) {
 
 			stdout := ts.Stdout.String()
 			assert.Contains(t, stdout, tc.expRender)
+		})
+	}
+}
+
+// TestRunStaticArchives tests that the static archives are working as expected.
+// each archive contains the following files/catalogs:
+// ├── a.js
+// ├── foo
+// │   └── bar.js
+// ├── sample
+// │   └── data.json
+// └── script.js
+// archive was made using binary & platform from the test name
+func TestRunStaticArchives(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		archive string
+	}{
+		{archive: "archive_v0.42.0_linux.tar"},
+		{archive: "archive_v0.42.0_windows.tar"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+
+		t.Run("Using "+tc.archive, func(t *testing.T) {
+			t.Parallel()
+
+			ts := NewGlobalTestState(t)
+
+			data, err := os.ReadFile(filepath.Join("testdata/archives", tc.archive)) //nolint:forbidigo // it's a test
+			require.NoError(t, err)
+
+			require.NoError(t, afero.WriteFile(ts.FS, filepath.Join(ts.Cwd, "archive.tar"), data, 0o644))
+
+			ts.CmdArgs = []string{"k6", "run", "--log-output=stdout", "archive.tar"}
+
+			cmd.ExecuteWithGlobalState(ts.GlobalState)
+			stdout := ts.Stdout.String()
+			assert.Contains(t, stdout, "called default() from script.js")
+			assert.Contains(t, stdout, "called Bar() from foo/bar.js")
+			assert.Contains(t, stdout, "called A() from a.js")
+			assert.Contains(t, stdout, "extracted john doe from sample/data.json")
+		})
+	}
+}
+
+func TestBadLogOutput(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"NotExist":      "badout",
+		"FileBadConfig": "file=,levels=bad",
+		"LokiBadConfig": "loki=,levels=bad",
+	}
+
+	for name, tc := range cases {
+		name := name
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ts := NewGlobalTestState(t)
+			ts.CmdArgs = []string{"k6", "run", "--log-output", tc, "-"}
+			ts.Stdin = bytes.NewBufferString(`export default function () {};`)
+			ts.ExpectedExitCode = -1
+			cmd.ExecuteWithGlobalState(ts.GlobalState)
 		})
 	}
 }

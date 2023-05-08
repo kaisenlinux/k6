@@ -3,6 +3,7 @@ package js
 import (
 	"context"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/url"
 	"os"
@@ -58,7 +59,7 @@ func getSimpleRunner(tb testing.TB, filename, data string, opts ...interface{}) 
 			fsResolvers = opt
 		case lib.RuntimeOptions:
 			rtOpts = opt
-		case *logrus.Logger:
+		case logrus.FieldLogger:
 			logger = opt
 		default:
 			tb.Fatalf("unknown test option %q", opt)
@@ -82,6 +83,7 @@ func getSimpleRunner(tb testing.TB, filename, data string, opts ...interface{}) 
 	)
 }
 
+// TODO: remove the need for this function, see https://github.com/grafana/k6/issues/2968
 func extractLogger(fl logrus.FieldLogger) *logrus.Logger {
 	switch e := fl.(type) {
 	case *logrus.Entry:
@@ -103,8 +105,7 @@ func TestConsoleLogWithGojaNativeObject(t *testing.T) {
 	err := obj.Set("text", "nativeObject")
 	require.NoError(t, err)
 
-	logger := testutils.NewLogger(t)
-	hook := logtest.NewLocal(logger)
+	logger, hook := testutils.NewLoggerWithHook(t)
 
 	c := newConsole(logger)
 	c.Log(obj)
@@ -160,8 +161,7 @@ func TestConsoleLogObjectsWithGoTypes(t *testing.T) {
 			rt.SetFieldNameMapper(common.FieldNameMapper{})
 			obj := rt.ToValue(tt.in)
 
-			logger := testutils.NewLogger(t)
-			hook := logtest.NewLocal(logger)
+			logger, hook := testutils.NewLoggerWithHook(t)
 
 			c := newConsole(logger)
 			c.Log(obj)
@@ -220,7 +220,7 @@ func TestConsoleLog(t *testing.T) {
 
 			logger := extractLogger(vu.(*ActiveVU).Console.logger)
 
-			logger.Out = ioutil.Discard
+			logger.Out = io.Discard
 			logger.Level = logrus.DebugLevel
 			hook := logtest.NewLocal(logger)
 
@@ -278,7 +278,7 @@ func TestConsoleLevels(t *testing.T) {
 
 					logger := extractLogger(vu.(*ActiveVU).Console.logger)
 
-					logger.Out = ioutil.Discard
+					logger.Out = io.Discard
 					logger.Level = logrus.DebugLevel
 					hook := logtest.NewLocal(logger)
 
@@ -323,13 +323,16 @@ func TestFileConsole(t *testing.T) {
 		preExistingText = "Prexisting file\n"
 	)
 	for name, level := range levels {
+		name, level := name, level
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			for args, result := range argsets {
+				args, result := args, result
 				t.Run(args, func(t *testing.T) {
 					t.Parallel()
 					// whether the file is existed before logging
 					for msg, deleteFile := range preExisting {
+						msg, deleteFile := msg, deleteFile
 						t.Run(msg, func(t *testing.T) {
 							t.Parallel()
 							f, err := ioutil.TempFile("", "")
@@ -404,7 +407,7 @@ func TestFileConsole(t *testing.T) {
 							f, err = os.Open(logFilename) //nolint:gosec
 							require.NoError(t, err)
 
-							fileContent, err := ioutil.ReadAll(f)
+							fileContent, err := io.ReadAll(f)
 							require.NoError(t, err)
 
 							expectedStr := entryStr

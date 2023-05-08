@@ -14,7 +14,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/big"
 	"net"
 	"net/http"
@@ -32,9 +31,7 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
 	"github.com/mccutchen/go-httpbin/httpbin"
-	"github.com/oxtoacart/bpool"
 	"github.com/sirupsen/logrus"
-	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v3"
@@ -123,6 +120,9 @@ type httpTestCase struct {
 	runtime  *modulestest.Runtime
 	samples  chan metrics.SampleContainer
 	instance *ModuleInstance
+
+	logger logrus.FieldLogger
+	hook   *testutils.SimpleLogrusHook
 }
 
 func newTestCase(t testing.TB) *httpTestCase {
@@ -134,6 +134,9 @@ func newTestCase(t testing.TB) *httpTestCase {
 
 	logger := logrus.New()
 	logger.Level = logrus.DebugLevel
+
+	hook := testutils.NewLogHook()
+	logger.AddHook(hook)
 
 	options := lib.Options{
 		MaxRedirects: null.IntFrom(10),
@@ -147,13 +150,13 @@ func newTestCase(t testing.TB) *httpTestCase {
 	samples := make(chan metrics.SampleContainer, 1000)
 
 	state := &lib.State{
-		Options:   options,
-		Logger:    logger,
-		Group:     root,
-		TLSConfig: tb.TLSClientConfig,
-		Transport: tb.HTTPTransport,
-		BPool:     bpool.NewBufferPool(1),
-		Samples:   samples,
+		Options:    options,
+		Logger:     logger,
+		Group:      root,
+		TLSConfig:  tb.TLSClientConfig,
+		Transport:  tb.HTTPTransport,
+		BufferPool: lib.NewBufferPool(),
+		Samples:    samples,
 		Tags: lib.NewVUStateTags(registry.RootTagSet().WithTagsFromMap(map[string]string{
 			"group": root.Path,
 		})),
@@ -168,6 +171,8 @@ func newTestCase(t testing.TB) *httpTestCase {
 		samples:  samples,
 		runtime:  runtime,
 		instance: mi,
+		logger:   logger,
+		hook:     hook,
 	}
 }
 
@@ -226,8 +231,7 @@ func TestRequest(t *testing.T) {
 			assert.NoError(t, err)
 
 			t.Run("Unset Max", func(t *testing.T) {
-				hook := logtest.NewLocal(state.Logger)
-				defer hook.Reset()
+				ts.hook.Reset()
 
 				oldOpts := state.Options
 				defer func() { state.Options = oldOpts }()
@@ -241,12 +245,11 @@ func TestRequest(t *testing.T) {
 				`))
 				assert.NoError(t, err)
 
-				logEntry := hook.LastEntry()
-				if assert.NotNil(t, logEntry) {
-					assert.Equal(t, logrus.WarnLevel, logEntry.Level)
-					assert.Equal(t, sr("HTTPBIN_URL/redirect/11"), logEntry.Data["url"])
-					assert.Equal(t, "Stopped after 11 redirects and returned the redirection; pass { redirects: n } in request params or set global maxRedirects to silence this", logEntry.Message)
-				}
+				logEntry := ts.hook.LastEntry()
+				require.NotNil(t, logEntry)
+				assert.Equal(t, logrus.WarnLevel, logEntry.Level)
+				assert.Equal(t, sr("HTTPBIN_URL/redirect/11"), logEntry.Data["url"])
+				assert.Equal(t, "Stopped after 11 redirects and returned the redirection; pass { redirects: n } in request params or set global maxRedirects to silence this", logEntry.Message)
 			})
 		})
 		t.Run("requestScopeRedirects", func(t *testing.T) {
@@ -270,7 +273,7 @@ func TestRequest(t *testing.T) {
 		t.Run("post body", func(t *testing.T) {
 			tb.Mux.HandleFunc("/post-redirect", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				require.Equal(t, r.Method, "POST")
-				_, _ = io.Copy(ioutil.Discard, r.Body)
+				_, _ = io.Copy(io.Discard, r.Body)
 				http.Redirect(w, r, sr("HTTPBIN_URL/post"), http.StatusPermanentRedirect)
 			}))
 			_, err := rt.RunString(sr(`
@@ -293,8 +296,7 @@ func TestRequest(t *testing.T) {
 			assert.NoError(t, err)
 		})
 		t.Run("10s", func(t *testing.T) {
-			hook := logtest.NewLocal(state.Logger)
-			defer hook.Reset()
+			ts.hook.Reset()
 
 			startTime := time.Now()
 			_, err := rt.RunString(sr(`
@@ -307,12 +309,10 @@ func TestRequest(t *testing.T) {
 			assert.Contains(t, err.Error(), "request timeout")
 			assert.WithinDuration(t, startTime.Add(1*time.Second), endTime, 2*time.Second)
 
-			logEntry := hook.LastEntry()
-			assert.Nil(t, logEntry)
+			assert.Nil(t, ts.hook.LastEntry())
 		})
 		t.Run("10s", func(t *testing.T) {
-			hook := logtest.NewLocal(state.Logger)
-			defer hook.Reset()
+			ts.hook.Reset()
 
 			startTime := time.Now()
 			_, err := rt.RunString(sr(`
@@ -325,8 +325,7 @@ func TestRequest(t *testing.T) {
 			assert.Contains(t, err.Error(), "request timeout")
 			assert.WithinDuration(t, startTime.Add(1*time.Second), endTime, 2*time.Second)
 
-			logEntry := hook.LastEntry()
-			assert.Nil(t, logEntry)
+			assert.Nil(t, ts.hook.LastEntry())
 		})
 	})
 	t.Run("UserAgent", func(t *testing.T) {
@@ -504,19 +503,16 @@ func TestRequest(t *testing.T) {
 		}
 	})
 	t.Run("Invalid", func(t *testing.T) {
-		hook := logtest.NewLocal(state.Logger)
-		defer hook.Reset()
+		ts.hook.Reset()
 
 		_, err := rt.RunString(`http.request("", "");`)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unsupported protocol scheme")
 
-		logEntry := hook.LastEntry()
-		assert.Nil(t, logEntry)
+		assert.Nil(t, ts.hook.LastEntry())
 
 		t.Run("throw=false", func(t *testing.T) {
-			hook := logtest.NewLocal(state.Logger)
-			defer hook.Reset()
+			ts.hook.Reset()
 
 			_, err := rt.RunString(`
 				var res = http.request("GET", "some://example.com", null, { throw: false });
@@ -528,12 +524,13 @@ func TestRequest(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "another error")
 
-			logEntry := hook.LastEntry()
-			if assert.NotNil(t, logEntry) {
-				assert.Equal(t, logrus.WarnLevel, logEntry.Level)
-				assert.Contains(t, logEntry.Data["error"].(error).Error(), "unsupported protocol scheme")
-				assert.Equal(t, "Request Failed", logEntry.Message)
-			}
+			logEntry := ts.hook.LastEntry()
+			require.NotNil(t, logEntry)
+			assert.Equal(t, logrus.WarnLevel, logEntry.Level)
+			err, ok := logEntry.Data["error"].(error)
+			require.True(t, ok)
+			assert.ErrorContains(t, err, "unsupported protocol scheme")
+			assert.Equal(t, "Request Failed", logEntry.Message)
 		})
 	})
 	t.Run("InvalidURL", func(t *testing.T) {
@@ -554,8 +551,7 @@ func TestRequest(t *testing.T) {
 			state.Options.Throw.Bool = false
 			defer func() { state.Options.Throw.Bool = true }()
 
-			hook := logtest.NewLocal(state.Logger)
-			defer hook.Reset()
+			ts.hook.Reset()
 
 			js := `
 				(function(){
@@ -574,7 +570,7 @@ func TestRequest(t *testing.T) {
 			require.Equal(t, int64(1020), retobj["error_code"])
 			require.Equal(t, expErr, retobj["error"])
 
-			logEntry := hook.LastEntry()
+			logEntry := ts.hook.LastEntry()
 			require.NotNil(t, logEntry)
 			assert.Equal(t, logrus.WarnLevel, logEntry.Level)
 			assert.Contains(t, logEntry.Data["error"].(error).Error(), expErr)
@@ -585,8 +581,7 @@ func TestRequest(t *testing.T) {
 			state.Options.Throw.Bool = false
 			defer func() { state.Options.Throw.Bool = true }()
 
-			hook := logtest.NewLocal(state.Logger)
-			defer hook.Reset()
+			ts.hook.Reset()
 
 			js := `
 				(function(){
@@ -601,7 +596,7 @@ func TestRequest(t *testing.T) {
 			assert.Nil(t, ret)
 			assert.Contains(t, err.Error(), "unexpected end of JSON input")
 
-			logEntry := hook.LastEntry()
+			logEntry := ts.hook.LastEntry()
 			require.NotNil(t, logEntry)
 			assert.Equal(t, logrus.WarnLevel, logEntry.Level)
 			assert.Contains(t, logEntry.Data["error"].(error).Error(), expErr)
@@ -710,7 +705,7 @@ func TestRequest(t *testing.T) {
 						}
 
 						http.SetCookie(w, &cookie)
-						w.WriteHeader(200)
+						w.WriteHeader(http.StatusOK)
 					}))
 					cookieJar, err := cookiejar.New(nil)
 					require.NoError(t, err)
@@ -1297,12 +1292,10 @@ func TestRequestCancellation(t *testing.T) {
 	ts := newTestCase(t)
 	tb := ts.tb
 	rt := ts.runtime.VU.Runtime()
-	state := ts.runtime.VU.State()
 	mi := ts.instance
 	sr := tb.Replacer.Replace
 
-	hook := logtest.NewLocal(state.Logger)
-	defer hook.Reset()
+	ts.hook.Reset()
 
 	testVU, ok := mi.vu.(*modulestest.VU)
 	require.True(t, ok)
@@ -1313,7 +1306,7 @@ func TestRequestCancellation(t *testing.T) {
 
 	_, err := rt.RunString(sr(`http.get("HTTPBIN_URL/get/");`))
 	assert.Error(t, err)
-	assert.Nil(t, hook.LastEntry())
+	assert.Nil(t, ts.hook.LastEntry())
 }
 
 func TestRequestArrayBufferBody(t *testing.T) {
@@ -1373,10 +1366,6 @@ func TestRequestCompression(t *testing.T) {
 	tb := ts.tb
 	rt := ts.runtime.VU.Runtime()
 	state := ts.runtime.VU.State()
-
-	logHook := testutils.SimpleLogrusHook{HookedLevels: []logrus.Level{logrus.WarnLevel}}
-	state.Logger.AddHook(&logHook)
-
 	// We don't expect any failed requests
 	state.Options.Throw = null.BoolFrom(true)
 
@@ -1496,7 +1485,7 @@ func TestRequestCompression(t *testing.T) {
 		expectedEncoding = "not, valid"
 		actualEncoding = "gzip, deflate"
 
-		logHook.Drain()
+		ts.hook.Drain()
 		t.Run("encoding", func(t *testing.T) {
 			_, err := rt.RunString(tb.Replacer.Replace(`
 				http.post("HTTPBIN_URL/compressed-text", ` + "`" + text + "`" + `,
@@ -1506,7 +1495,7 @@ func TestRequestCompression(t *testing.T) {
 				);
 			`))
 			require.NoError(t, err)
-			require.NotEmpty(t, logHook.Drain())
+			require.NotEmpty(t, ts.hook.Drain())
 		})
 
 		t.Run("encoding and length", func(t *testing.T) {
@@ -1519,7 +1508,7 @@ func TestRequestCompression(t *testing.T) {
 				);
 			`))
 			require.NoError(t, err)
-			require.NotEmpty(t, logHook.Drain())
+			require.NotEmpty(t, ts.hook.Drain())
 		})
 
 		expectedEncoding = actualEncoding
@@ -1532,7 +1521,7 @@ func TestRequestCompression(t *testing.T) {
 				);
 			`))
 			require.NoError(t, err)
-			require.Empty(t, logHook.Drain())
+			require.Empty(t, ts.hook.Drain())
 		})
 
 		// TODO: move to some other test?
@@ -1541,7 +1530,7 @@ func TestRequestCompression(t *testing.T) {
 				`http.post("HTTPBIN_URL/post", "0123456789", { "headers": {"Content-Length": "10"}});`,
 			))
 			require.NoError(t, err)
-			require.Empty(t, logHook.Drain())
+			require.Empty(t, ts.hook.Drain())
 		})
 
 		t.Run("content-length is set", func(t *testing.T) {
@@ -1552,7 +1541,7 @@ func TestRequestCompression(t *testing.T) {
 				}
 			`))
 			require.NoError(t, err)
-			require.Empty(t, logHook.Drain())
+			require.Empty(t, ts.hook.Drain())
 		})
 	})
 }
@@ -1575,7 +1564,7 @@ func TestResponseTypes(t *testing.T) {
 		assert.Equal(t, textLen, n)
 	}))
 	tb.Mux.HandleFunc("/compare-text", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := ioutil.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
 		assert.Equal(t, text, string(body))
 	}))
@@ -1591,7 +1580,7 @@ func TestResponseTypes(t *testing.T) {
 		assert.Equal(t, binaryLen, n)
 	}))
 	tb.Mux.HandleFunc("/compare-bin", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := ioutil.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
 		assert.True(t, bytes.Equal(binary, body))
 	}))
@@ -1721,11 +1710,11 @@ func TestErrorCodes(t *testing.T) {
 
 	// Handple paths with custom logic
 	tb.Mux.HandleFunc("/no-location-redirect", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(302)
+		w.WriteHeader(http.StatusFound)
 	}))
 	tb.Mux.HandleFunc("/bad-location-redirect", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Location", "h\t:/") // \n is forbidden
-		w.WriteHeader(302)
+		w.WriteHeader(http.StatusFound)
 	}))
 
 	testCases := []struct {
@@ -1973,7 +1962,7 @@ func BenchmarkHandlingOfResponseBodies(b *testing.B) {
 	rt := ts.runtime.VU.Runtime()
 	state := ts.runtime.VU.State()
 
-	state.BPool = bpool.NewBufferPool(100)
+	state.BufferPool = lib.NewBufferPool()
 
 	go func() {
 		ctxDone := tb.Context.Done()
@@ -2238,7 +2227,7 @@ func TestDigestAuthWithBody(t *testing.T) {
 
 	tb.Mux.HandleFunc("/digest-auth-with-post/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "POST", r.Method)
-		body, err := ioutil.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
 		require.Equal(t, "super secret body", string(body))
 		httpbin.New().DigestAuth(w, r) // this doesn't read the body
@@ -2338,7 +2327,7 @@ func GenerateTLSCertificate(t *testing.T, host string, notBefore time.Time, vali
 func GetTestServerWithCertificate(t *testing.T, certPem, key []byte, suitesIds ...uint16) (*httptest.Server, *http.Client) {
 	server := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(200)
+			w.WriteHeader(http.StatusOK)
 		}),
 		ReadHeaderTimeout: time.Second,
 		ReadTimeout:       time.Second,

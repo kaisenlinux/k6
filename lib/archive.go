@@ -6,9 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"io/fs"
 	"net/url"
-	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -127,7 +126,7 @@ func ReadArchive(in io.Reader) (*Archive, error) {
 			continue
 		}
 
-		data, err := ioutil.ReadAll(r)
+		data, err := io.ReadAll(r)
 		if err != nil {
 			return nil, err
 		}
@@ -162,13 +161,13 @@ func ReadArchive(in io.Reader) (*Archive, error) {
 			}
 			fallthrough
 		case "https", "file":
-			fs := arc.getFs(pfx)
+			fileSystem := arc.getFs(pfx)
 			name = filepath.FromSlash(name)
-			err = afero.WriteFile(fs, name, data, os.FileMode(hdr.Mode))
+			err = afero.WriteFile(fileSystem, name, data, fs.FileMode(hdr.Mode))
 			if err != nil {
 				return nil, err
 			}
-			err = fs.Chtimes(name, hdr.AccessTime, hdr.ModTime)
+			err = fileSystem.Chtimes(name, hdr.AccessTime, hdr.ModTime)
 			if err != nil {
 				return nil, err
 			}
@@ -278,10 +277,10 @@ func (arc *Archive) Write(out io.Writer) error {
 		//   anonymize paths before stuffing them in a shareable archive.
 		foundDirs := make(map[string]bool)
 		paths := make([]string, 0, 10)
-		infos := make(map[string]os.FileInfo) // ... fix this ?
+		infos := make(map[string]fs.FileInfo) // ... fix this ?
 		files := make(map[string][]byte)
 
-		walkFunc := filepath.WalkFunc(func(filePath string, info os.FileInfo, err error) error {
+		walkFunc := filepath.WalkFunc(func(filePath string, info fs.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}

@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"strconv"
 	"sync"
@@ -56,7 +55,7 @@ func (mc *MetricsClient) PushMetric(referenceID string, s []*Sample) error {
 	jsonTime := time.Since(jsonStart)
 
 	// TODO: change the context, maybe to one with a timeout
-	req, err := http.NewRequestWithContext(context.Background(), "POST", url, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, nil)
 	if err != nil {
 		return err
 	}
@@ -95,9 +94,9 @@ func (mc *MetricsClient) PushMetric(referenceID string, s []*Sample) error {
 	}
 
 	req.Header.Set("Content-Length", strconv.Itoa(len(b)))
-	req.Body = ioutil.NopCloser(bytes.NewReader(b))
+	req.Body = io.NopCloser(bytes.NewReader(b))
 	req.GetBody = func() (io.ReadCloser, error) {
-		return ioutil.NopCloser(bytes.NewReader(b)), nil
+		return io.NopCloser(bytes.NewReader(b)), nil
 	}
 
 	err = mc.Client.Do(req, nil)

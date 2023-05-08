@@ -6,7 +6,6 @@ import (
 	"compress/zlib"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"strings"
 
@@ -19,6 +18,7 @@ import (
 // CompressionType is used to specify what compression is to be used to compress the body of a
 // request
 // The conversion and validation methods are auto-generated with https://github.com/alvaroloes/enumer:
+//
 //go:generate enumer -type=CompressionType -transform=snake -trimprefix CompressionType -output compression_type_gen.go
 type CompressionType uint
 
@@ -125,7 +125,7 @@ func readResponseBody(
 	}
 
 	if respType == ResponseTypeNone {
-		_, err := io.Copy(ioutil.Discard, resp.Body)
+		_, err := io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 		if err != nil {
 			respErr = err
@@ -136,7 +136,7 @@ func readResponseBody(
 	rc := &readCloser{resp.Body}
 	// Ensure that the entire response body is read and closed, e.g. in case of decoding errors
 	defer func(respBody io.ReadCloser) {
-		_, _ = io.Copy(ioutil.Discard, respBody)
+		_, _ = io.Copy(io.Discard, respBody)
 		_ = respBody.Close()
 	}(resp.Body)
 
@@ -170,9 +170,9 @@ func readResponseBody(
 			rc = &readCloser{decoder}
 		}
 	}
-	buf := state.BPool.Get()
-	defer state.BPool.Put(buf)
-	buf.Reset()
+
+	buf := state.BufferPool.Get()
+	defer state.BufferPool.Put(buf)
 	_, err := io.Copy(buf, rc.Reader)
 	if err != nil {
 		respErr = wrapDecompressionError(err)

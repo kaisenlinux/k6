@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/url"
 	"os"
@@ -31,7 +32,7 @@ import (
 
 const isWindows = runtime.GOOS == "windows"
 
-func getTestPreInitState(tb testing.TB, logger *logrus.Logger, rtOpts *lib.RuntimeOptions) *lib.TestPreInitState {
+func getTestPreInitState(tb testing.TB, logger logrus.FieldLogger, rtOpts *lib.RuntimeOptions) *lib.TestPreInitState {
 	if logger == nil {
 		logger = testutils.NewLogger(tb)
 	}
@@ -50,14 +51,14 @@ func getTestPreInitState(tb testing.TB, logger *logrus.Logger, rtOpts *lib.Runti
 func getSimpleBundle(tb testing.TB, filename, data string, opts ...interface{}) (*Bundle, error) {
 	fs := afero.NewMemMapFs()
 	var rtOpts *lib.RuntimeOptions
-	var logger *logrus.Logger
+	var logger logrus.FieldLogger
 	for _, o := range opts {
 		switch opt := o.(type) {
 		case afero.Fs:
 			fs = opt
 		case lib.RuntimeOptions:
 			rtOpts = &opt
-		case *logrus.Logger:
+		case logrus.FieldLogger:
 			logger = opt
 		default:
 			tb.Fatalf("unknown test option %q", opt)
@@ -123,8 +124,8 @@ func TestNewBundle(t *testing.T) {
 		t.Parallel()
 		b, err := getSimpleBundle(t, "-", `export default function() {};`)
 		require.NoError(t, err)
-		assert.Equal(t, "file://-", b.Filename.String())
-		assert.Equal(t, "file:///", b.BaseInitContext.pwd.String())
+		assert.Equal(t, "file://-", b.sourceData.URL.String())
+		assert.Equal(t, "file:///", b.pwd.String())
 	})
 	t.Run("CompatibilityMode", func(t *testing.T) {
 		t.Parallel()
@@ -368,6 +369,7 @@ func TestNewBundle(t *testing.T) {
 		t.Run("TLSCipherSuites", func(t *testing.T) {
 			t.Parallel()
 			for suiteName, suiteID := range lib.SupportedTLSCipherSuites {
+				suiteName, suiteID := suiteName, suiteID
 				t.Run(suiteName, func(t *testing.T) {
 					t.Parallel()
 					script := `
@@ -434,11 +436,11 @@ func TestNewBundle(t *testing.T) {
 			t.Parallel()
 			logger := logrus.New()
 			logger.SetLevel(logrus.InfoLevel)
-			logger.Out = ioutil.Discard
-			hook := testutils.SimpleLogrusHook{
-				HookedLevels: []logrus.Level{logrus.WarnLevel, logrus.InfoLevel, logrus.ErrorLevel, logrus.FatalLevel, logrus.PanicLevel},
-			}
-			logger.AddHook(&hook)
+			logger.Out = io.Discard
+			hook := testutils.NewLogHook(
+				logrus.WarnLevel, logrus.InfoLevel, logrus.ErrorLevel, logrus.FatalLevel, logrus.PanicLevel,
+			)
+			logger.AddHook(hook)
 
 			_, err := getSimpleBundle(t, "/script.js", `
 				export let options = {
@@ -674,6 +676,7 @@ func TestOpen(t *testing.T) {
 	logger := testutils.NewLogger(t)
 
 	for name, fsInit := range fss {
+		name, fsInit := name, fsInit
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			for _, tCase := range testCases {

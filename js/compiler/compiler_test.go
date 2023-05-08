@@ -2,7 +2,7 @@ package compiler
 
 import (
 	"errors"
-	"io/ioutil"
+	"io"
 	"strings"
 	"testing"
 
@@ -74,9 +74,8 @@ func TestCompile(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, src, code)
 		v, err := goja.New().RunProgram(pgm)
-		if assert.NoError(t, err) {
-			assert.Equal(t, int64(3), v.Export())
-		}
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), v.Export())
 	})
 
 	t.Run("ES5 Wrap", func(t *testing.T) {
@@ -88,16 +87,13 @@ func TestCompile(t *testing.T) {
 		assert.Equal(t, "(function(module, exports){\nexports.d=1+(function() { return 2; })()\n})\n", code)
 		rt := goja.New()
 		v, err := rt.RunProgram(pgm)
-		if assert.NoError(t, err) {
-			fn, ok := goja.AssertFunction(v)
-			if assert.True(t, ok, "not a function") {
-				exp := make(map[string]goja.Value)
-				_, err := fn(goja.Undefined(), goja.Undefined(), rt.ToValue(exp))
-				if assert.NoError(t, err) {
-					assert.Equal(t, int64(3), exp["d"].Export())
-				}
-			}
-		}
+		require.NoError(t, err)
+		fn, ok := goja.AssertFunction(v)
+		require.True(t, ok, "not a function")
+		exp := make(map[string]goja.Value)
+		_, err = fn(goja.Undefined(), goja.Undefined(), rt.ToValue(exp))
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), exp["d"].Export())
 	})
 
 	t.Run("ES5 Invalid", func(t *testing.T) {
@@ -171,11 +167,9 @@ func TestCorruptSourceMap(t *testing.T) {
 
 	logger := logrus.New()
 	logger.SetLevel(logrus.DebugLevel)
-	logger.Out = ioutil.Discard
-	hook := testutils.SimpleLogrusHook{
-		HookedLevels: []logrus.Level{logrus.InfoLevel, logrus.WarnLevel},
-	}
-	logger.AddHook(&hook)
+	logger.Out = io.Discard
+	hook := testutils.NewLogHook(logrus.InfoLevel, logrus.WarnLevel)
+	logger.AddHook(hook)
 
 	compiler := New(logger)
 	compiler.Options = Options{
@@ -202,11 +196,9 @@ func TestCorruptSourceMapOnlyForBabel(t *testing.T) {
 
 	logger := logrus.New()
 	logger.SetLevel(logrus.DebugLevel)
-	logger.Out = ioutil.Discard
-	hook := testutils.SimpleLogrusHook{
-		HookedLevels: []logrus.Level{logrus.InfoLevel, logrus.WarnLevel},
-	}
-	logger.AddHook(&hook)
+	logger.Out = io.Discard
+	hook := testutils.NewLogHook(logrus.InfoLevel, logrus.WarnLevel)
+	logger.AddHook(hook)
 
 	compiler := New(logger)
 	compiler.Options = Options{
@@ -234,11 +226,9 @@ func TestMinimalSourceMap(t *testing.T) {
 
 	logger := logrus.New()
 	logger.SetLevel(logrus.DebugLevel)
-	logger.Out = ioutil.Discard
-	hook := testutils.SimpleLogrusHook{
-		HookedLevels: []logrus.Level{logrus.InfoLevel, logrus.WarnLevel},
-	}
-	logger.AddHook(&hook)
+	logger.Out = io.Discard
+	hook := testutils.NewLogHook(logrus.InfoLevel, logrus.WarnLevel)
+	logger.AddHook(hook)
 
 	compiler := New(logger)
 	compiler.Options = Options{

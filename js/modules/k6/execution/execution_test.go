@@ -5,7 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -119,10 +119,10 @@ func TestVUTagsSuccessOverwriteSystemTag(t *testing.T) {
 func TestVUTagsErrorOutOnInvalidValues(t *testing.T) {
 	t.Parallel()
 
-	logHook := &testutils.SimpleLogrusHook{HookedLevels: []logrus.Level{logrus.WarnLevel}}
+	logHook := testutils.NewLogHook(logrus.WarnLevel)
 	testLog := logrus.New()
 	testLog.AddHook(logHook)
-	testLog.SetOutput(ioutil.Discard)
+	testLog.SetOutput(io.Discard)
 
 	cases := []string{
 		"null",

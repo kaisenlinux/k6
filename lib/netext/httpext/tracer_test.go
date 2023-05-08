@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"net"
 	"net/http"
@@ -116,14 +115,14 @@ func TestTracer(t *testing.T) { //nolint:tparallel
 	for tnum, isReuse := range []bool{false, true, true} { //nolint:paralleltest
 		t.Run(fmt.Sprintf("Test #%d", tnum), func(t *testing.T) {
 			// Do not enable parallel testing, test relies on sequential execution
-			req, err := http.NewRequest("GET", srv.URL+"/get", nil)
+			req, err := http.NewRequest(http.MethodGet, srv.URL+"/get", nil)
 			require.NoError(t, err)
 
 			tracer, ct := getTestTracer(t)
 			res, err := transport.RoundTrip(req.WithContext(httptrace.WithClientTrace(context.Background(), ct)))
 			require.NoError(t, err)
 
-			_, err = io.Copy(ioutil.Discard, res.Body)
+			_, err = io.Copy(io.Discard, res.Body)
 			assert.NoError(t, err)
 			assert.NoError(t, res.Body.Close())
 			if runtime.GOOS == "windows" {
@@ -204,14 +203,14 @@ func TestTracerNegativeHttpSendingValues(t *testing.T) {
 		return failingConn{conn}, err
 	}
 
-	req, err := http.NewRequest("GET", srv.URL+"/get", nil)
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/get", nil)
 	require.NoError(t, err)
 
 	{
 		tracer := &Tracer{}
 		res, err := transport.RoundTrip(req.WithContext(httptrace.WithClientTrace(context.Background(), tracer.Trace())))
 		require.NoError(t, err)
-		_, err = io.Copy(ioutil.Discard, res.Body)
+		_, err = io.Copy(io.Discard, res.Body)
 		assert.NoError(t, err)
 		assert.NoError(t, res.Body.Close())
 		tracer.Done()
@@ -224,7 +223,7 @@ func TestTracerNegativeHttpSendingValues(t *testing.T) {
 		tracer := &Tracer{}
 		res, err := transport.RoundTrip(req.WithContext(httptrace.WithClientTrace(context.Background(), tracer.Trace())))
 		require.NoError(t, err)
-		_, err = io.Copy(ioutil.Discard, res.Body)
+		_, err = io.Copy(io.Discard, res.Body)
 		assert.NoError(t, err)
 		assert.NoError(t, res.Body.Close())
 		trail := tracer.Done()
@@ -242,7 +241,7 @@ func TestTracerError(t *testing.T) {
 	defer srv.Close()
 
 	tracer := &Tracer{}
-	req, err := http.NewRequest("GET", srv.URL+"/get", nil)
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/get", nil)
 	require.NoError(t, err)
 
 	_, err = http.DefaultTransport.RoundTrip(
@@ -261,7 +260,7 @@ func TestCancelledRequest(t *testing.T) {
 
 	cancelTest := func(t *testing.T) {
 		tracer := &Tracer{}
-		req, err := http.NewRequestWithContext(context.Background(), "GET", srv.URL+"/delay/1", nil)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/delay/1", nil)
 		require.NoError(t, err)
 
 		ctx, cancel := context.WithCancel(httptrace.WithClientTrace(req.Context(), tracer.Trace()))

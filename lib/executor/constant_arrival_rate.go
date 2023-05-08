@@ -190,6 +190,7 @@ func (car *ConstantArrivalRate) Init(ctx context.Context) error {
 // time should iteration X begin) different, but keep everything else the same.
 // This will allow us to implement https://github.com/k6io/k6/issues/1386
 // and things like all of the TODOs below in one place only.
+//
 //nolint:funlen,cyclop
 func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics.SampleContainer) (err error) {
 	gracefulStop := car.config.GetGracefulStop()
@@ -217,7 +218,7 @@ func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics
 		<-waitOnProgressChannel
 	}()
 
-	vusPool := newActiveVUPool()
+	vusPool := newActiveVUPool(car.executionState)
 	defer func() {
 		// Make sure all VUs aren't executing iterations anymore, for the cancel()
 		// below to deactivate them.
@@ -264,7 +265,11 @@ func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics
 	}()
 
 	returnVU := func(u lib.InitializedVU) {
-		car.executionState.ReturnVU(u, true)
+		// Return the VU without decreasing the global active VU counter, which
+		// is done in the goroutine started by activeVUPool.AddVU, whenever the
+		// VU finishes running an iteration. This results in a more accurate
+		// report of VUs that are _actually_ active.
+		car.executionState.ReturnVU(u, false)
 		activeVUsWg.Done()
 	}
 
@@ -275,7 +280,6 @@ func (car ConstantArrivalRate) Run(parentCtx context.Context, out chan<- metrics
 			maxDurationCtx, car.config.BaseConfig, returnVU,
 			car.nextIterationCounters,
 		))
-		car.executionState.ModCurrentlyActiveVUsCount(+1)
 		atomic.AddUint64(&activeVUsCount, 1)
 		vusPool.AddVU(maxDurationCtx, activeVU, runIterationBasic)
 		return activeVU

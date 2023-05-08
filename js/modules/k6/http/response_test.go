@@ -83,7 +83,7 @@ func myFormHandler(w http.ResponseWriter, r *http.Request) {
 		body = []byte(testGetFormHTML)
 	}
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-	w.WriteHeader(200)
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
 
@@ -91,7 +91,7 @@ func jsonHandler(w http.ResponseWriter, r *http.Request) {
 	body := []byte(jsonData)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-	w.WriteHeader(200)
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
 
@@ -99,7 +99,7 @@ func invalidJSONHandler(w http.ResponseWriter, r *http.Request) {
 	body := []byte(invalidJSONData)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-	w.WriteHeader(200)
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
 
@@ -149,19 +149,18 @@ func TestResponse(t *testing.T) {
 
 		t.Run("group", func(t *testing.T) {
 			g, err := root.Group("my group")
-			if assert.NoError(t, err) {
-				old := state.Group
-				state.Group = g
+			require.NoError(t, err)
+			old := state.Group
+			state.Group = g
+			state.Tags.Modify(func(tagsAndMeta *metrics.TagsAndMeta) {
+				tagsAndMeta.SetTag("group", g.Path)
+			})
+			defer func() {
+				state.Group = old
 				state.Tags.Modify(func(tagsAndMeta *metrics.TagsAndMeta) {
-					tagsAndMeta.SetTag("group", g.Path)
+					tagsAndMeta.SetTag("group", old.Path)
 				})
-				defer func() {
-					state.Group = old
-					state.Tags.Modify(func(tagsAndMeta *metrics.TagsAndMeta) {
-						tagsAndMeta.SetTag("group", old.Path)
-					})
-				}()
-			}
+			}()
 
 			_, err = rt.RunString(sr(`
 				var res = http.request("GET", "HTTPBIN_URL/html");

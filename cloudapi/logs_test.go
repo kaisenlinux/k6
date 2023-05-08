@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -91,8 +91,8 @@ func TestMSGLog(t *testing.T) {
 	}
 
 	logger := logrus.New()
-	logger.Out = ioutil.Discard
-	hook := &testutils.SimpleLogrusHook{HookedLevels: logrus.AllLevels}
+	logger.Out = io.Discard
+	hook := testutils.NewLogHook()
 	logger.AddHook(hook)
 	expectMsg.Log(logger)
 	logLines := hook.Drain()
@@ -249,8 +249,8 @@ func TestStreamLogsToLogger(t *testing.T) {
 		})
 
 		logger := logrus.New()
-		logger.Out = ioutil.Discard
-		hook := &testutils.SimpleLogrusHook{HookedLevels: logrus.AllLevels}
+		logger.Out = io.Discard
+		hook := testutils.NewLogHook()
 		logger.AddHook(hook)
 
 		c := configFromHTTPMultiBin(tb)
@@ -321,8 +321,8 @@ func TestStreamLogsToLogger(t *testing.T) {
 		})
 
 		logger := logrus.New()
-		logger.Out = ioutil.Discard
-		hook := &testutils.SimpleLogrusHook{HookedLevels: logrus.AllLevels}
+		logger.Out = io.Discard
+		hook := testutils.NewLogHook()
 		logger.AddHook(hook)
 
 		c := configFromHTTPMultiBin(tb)
@@ -389,8 +389,8 @@ func TestStreamLogsToLogger(t *testing.T) {
 		})
 
 		logger := logrus.New()
-		logger.Out = ioutil.Discard
-		hook := &testutils.SimpleLogrusHook{HookedLevels: logrus.AllLevels}
+		logger.Out = io.Discard
+		hook := testutils.NewLogHook()
 		logger.AddHook(hook)
 
 		c := configFromHTTPMultiBin(tb)

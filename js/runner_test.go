@@ -11,6 +11,8 @@ import (
 	"encoding/pem"
 	"fmt"
 	"go/build"
+	"io"
+	"io/fs"
 	"io/ioutil"
 	stdlog "log"
 	"math/big"
@@ -18,7 +20,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -542,6 +543,26 @@ func TestSetupDataNoReturn(t *testing.T) {
 	};`)
 }
 
+func TestSetupDataPromise(t *testing.T) {
+	t.Parallel()
+	testSetupDataHelper(t, `
+	exports.options = { setupTimeout: "1s", teardownTimeout: "1s" };
+	exports.setup = async function() {
+        return await Promise.resolve({"data": "correct"})
+    }
+	exports.default = function(data) {
+		if (data.data !== "correct") {
+			throw new Error("default: wrong data: " + JSON.stringify(data))
+		}
+	};
+
+	exports.teardown = function(data) {
+		if (data.data !== "correct") {
+			throw new Error("teardown: wrong data: " + JSON.stringify(data))
+		}
+	};`)
+}
+
 func TestRunnerIntegrationImports(t *testing.T) {
 	t.Parallel()
 	t.Run("Modules", func(t *testing.T) {
@@ -839,25 +860,29 @@ func TestVUIntegrationGroups(t *testing.T) {
 
 func TestVUIntegrationMetrics(t *testing.T) {
 	t.Parallel()
-	r1, err := getSimpleRunner(t, "/script.js", `
+	testdata := make(map[string]*Runner, 2)
+	{
+		r1, err := getSimpleRunner(t, "/script.js", `
 		var group = require("k6").group;
 		var Trend = require("k6/metrics").Trend;
 		var myMetric = new Trend("my_metric");
 		exports.default = function() { myMetric.add(5); }
 		`)
-	require.NoError(t, err)
+		require.NoError(t, err)
+		testdata["Source"] = r1
 
-	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	r2, err := NewFromArchive(
-		&lib.TestPreInitState{
-			Logger:         testutils.NewLogger(t),
-			BuiltinMetrics: builtinMetrics,
-			Registry:       registry,
-		}, r1.MakeArchive())
-	require.NoError(t, err)
+		registry := metrics.NewRegistry()
+		builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
+		r2, err := NewFromArchive(
+			&lib.TestPreInitState{
+				Logger:         testutils.NewLogger(t),
+				BuiltinMetrics: builtinMetrics,
+				Registry:       registry,
+			}, r1.MakeArchive())
+		require.NoError(t, err)
+		testdata["Archive"] = r2
+	}
 
-	testdata := map[string]*Runner{"Source": r1, "Archive": r2}
 	for name, r := range testdata {
 		r := r
 		t.Run(name, func(t *testing.T) {
@@ -874,6 +899,7 @@ func TestVUIntegrationMetrics(t *testing.T) {
 			err = activeVU.RunOnce()
 			require.NoError(t, err)
 			sampleCount := 0
+			builtinMetrics := r.preInitState.BuiltinMetrics
 			for i, sampleC := range metrics.GetBufferedSamples(samples) {
 				for j, s := range sampleC.GetSamples() {
 					sampleCount++
@@ -884,14 +910,14 @@ func TestVUIntegrationMetrics(t *testing.T) {
 						assert.Equal(t, metrics.Trend, s.Metric.Type)
 					case 1:
 						assert.Equal(t, 0.0, s.Value)
-						assert.Equal(t, builtinMetrics.DataSent, s.Metric, "`data_sent` sample is before `data_received` and `iteration_duration`")
+						assert.Same(t, builtinMetrics.DataSent, s.Metric, "`data_sent` sample is before `data_received` and `iteration_duration`")
 					case 2:
 						assert.Equal(t, 0.0, s.Value)
-						assert.Equal(t, builtinMetrics.DataReceived, s.Metric, "`data_received` sample is after `data_received`")
+						assert.Same(t, builtinMetrics.DataReceived, s.Metric, "`data_received` sample is after `data_received`")
 					case 3:
-						assert.Equal(t, builtinMetrics.IterationDuration, s.Metric, "`iteration-duration` sample is after `data_received`")
+						assert.Same(t, builtinMetrics.IterationDuration, s.Metric, "`iteration-duration` sample is after `data_received`")
 					case 4:
-						assert.Equal(t, builtinMetrics.Iterations, s.Metric, "`iterations` sample is after `iteration_duration`")
+						assert.Same(t, builtinMetrics.Iterations, s.Metric, "`iterations` sample is after `iteration_duration`")
 						assert.Equal(t, float64(1), s.Value)
 					}
 				}
@@ -961,7 +987,7 @@ func GenerateTLSCertificate(t *testing.T, host string, notBefore time.Time, vali
 func GetTestServerWithCertificate(t *testing.T, certPem, key []byte) *httptest.Server {
 	server := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(200)
+			w.WriteHeader(http.StatusOK)
 		}),
 		ReadHeaderTimeout: time.Second,
 		ReadTimeout:       time.Second,
@@ -1474,8 +1500,8 @@ func TestVUDoesOpenUnderV0Condition(t *testing.T) {
 				console.log("hey")
 			}
 		`
-	require.NoError(t, afero.WriteFile(baseFS, "/home/somebody/test.json", []byte(`42`), os.ModePerm))
-	require.NoError(t, afero.WriteFile(baseFS, "/script.js", []byte(data), os.ModePerm))
+	require.NoError(t, afero.WriteFile(baseFS, "/home/somebody/test.json", []byte(`42`), fs.ModePerm))
+	require.NoError(t, afero.WriteFile(baseFS, "/script.js", []byte(data), fs.ModePerm))
 
 	fs := fsext.NewCacheOnReadFs(baseFS, afero.NewMemMapFs(), 0)
 
@@ -1498,8 +1524,8 @@ func TestVUDoesNotOpenUnderConditions(t *testing.T) {
 				console.log("hey")
 			}
 		`
-	require.NoError(t, afero.WriteFile(baseFS, "/home/somebody/test.json", []byte(`42`), os.ModePerm))
-	require.NoError(t, afero.WriteFile(baseFS, "/script.js", []byte(data), os.ModePerm))
+	require.NoError(t, afero.WriteFile(baseFS, "/home/somebody/test.json", []byte(`42`), fs.ModePerm))
+	require.NoError(t, afero.WriteFile(baseFS, "/script.js", []byte(data), fs.ModePerm))
 
 	fs := fsext.NewCacheOnReadFs(baseFS, afero.NewMemMapFs(), 0)
 
@@ -1523,7 +1549,7 @@ func TestVUDoesNonExistingPathnUnderConditions(t *testing.T) {
 				console.log("hey")
 			}
 		`
-	require.NoError(t, afero.WriteFile(baseFS, "/script.js", []byte(data), os.ModePerm))
+	require.NoError(t, afero.WriteFile(baseFS, "/script.js", []byte(data), fs.ModePerm))
 
 	fs := fsext.NewCacheOnReadFs(baseFS, afero.NewMemMapFs(), 0)
 
@@ -1764,7 +1790,7 @@ func TestVUIntegrationClientCerts(t *testing.T) {
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			_, _ = fmt.Fprintf(w, "ok")
 		}),
-		ErrorLog: stdlog.New(ioutil.Discard, "", 0),
+		ErrorLog: stdlog.New(io.Discard, "", 0),
 	}
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() { _ = listener.Close() })
@@ -1961,7 +1987,7 @@ func TestInitContextForbidden(t *testing.T) {
 func TestArchiveRunningIntegrity(t *testing.T) {
 	t.Parallel()
 
-	fs := afero.NewMemMapFs()
+	fileSystem := afero.NewMemMapFs()
 	data := `
 			var fput = open("/home/somebody/test.json");
 			exports.options = { setupTimeout: "10s", teardownTimeout: "10s" };
@@ -1974,9 +2000,9 @@ func TestArchiveRunningIntegrity(t *testing.T) {
 				}
 			}
 		`
-	require.NoError(t, afero.WriteFile(fs, "/home/somebody/test.json", []byte(`42`), os.ModePerm))
-	require.NoError(t, afero.WriteFile(fs, "/script.js", []byte(data), os.ModePerm))
-	r1, err := getSimpleRunner(t, "/script.js", data, fs)
+	require.NoError(t, afero.WriteFile(fileSystem, "/home/somebody/test.json", []byte(`42`), fs.ModePerm))
+	require.NoError(t, afero.WriteFile(fileSystem, "/script.js", []byte(data), fs.ModePerm))
+	r1, err := getSimpleRunner(t, "/script.js", data, fileSystem)
 	require.NoError(t, err)
 
 	buf := bytes.NewBuffer(nil)
@@ -2019,12 +2045,12 @@ func TestArchiveRunningIntegrity(t *testing.T) {
 
 func TestArchiveNotPanicking(t *testing.T) {
 	t.Parallel()
-	fs := afero.NewMemMapFs()
-	require.NoError(t, afero.WriteFile(fs, "/non/existent", []byte(`42`), os.ModePerm))
+	fileSystem := afero.NewMemMapFs()
+	require.NoError(t, afero.WriteFile(fileSystem, "/non/existent", []byte(`42`), fs.ModePerm))
 	r1, err := getSimpleRunner(t, "/script.js", `
 			var fput = open("/non/existent");
 			exports.default = function(data) {}
-		`, fs)
+		`, fileSystem)
 	require.NoError(t, err)
 
 	arc := r1.MakeArchive()
@@ -2267,11 +2293,11 @@ func TestVUPanic(t *testing.T) {
 
 			logger := logrus.New()
 			logger.SetLevel(logrus.InfoLevel)
-			logger.Out = ioutil.Discard
-			hook := testutils.SimpleLogrusHook{
-				HookedLevels: []logrus.Level{logrus.InfoLevel, logrus.ErrorLevel, logrus.FatalLevel, logrus.PanicLevel},
-			}
-			logger.AddHook(&hook)
+			logger.Out = io.Discard
+			hook := testutils.NewLogHook(
+				logrus.InfoLevel, logrus.ErrorLevel, logrus.FatalLevel, logrus.PanicLevel,
+			)
+			logger.AddHook(hook)
 
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 			vu.(*ActiveVU).Runtime.Set("panic", func(str string) { panic(str) })
@@ -2312,7 +2338,7 @@ type multiFileTestCase struct {
 
 func runMultiFileTestCase(t *testing.T, tc multiFileTestCase, tb *httpmultibin.HTTPMultiBin) {
 	t.Helper()
-	runner, err := getSimpleRunner(t, tc.cwd+"/script.js", tc.script, tc.rtOpts, tc.fses)
+	runner, err := getSimpleRunner(t, strings.TrimRight(tc.cwd, "/")+"/script.js", tc.script, tc.rtOpts, tc.fses)
 	if tc.expInitErr {
 		require.Error(t, err)
 		return

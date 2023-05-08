@@ -5,9 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"io/ioutil"
-	"log"
-	"os"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -39,27 +38,27 @@ func (fw mockWriter) Write(p []byte) (n int, err error) {
 
 var _ io.Writer = mockWriter{}
 
-func getFiles(t *testing.T, fs afero.Fs) map[string]*bytes.Buffer {
+func getFiles(t *testing.T, fileSystem afero.Fs) map[string]*bytes.Buffer {
 	result := map[string]*bytes.Buffer{}
-	walkFn := func(filePath string, _ os.FileInfo, err error) error {
+	walkFn := func(filePath string, _ fs.FileInfo, err error) error {
 		if filePath == "/" || filePath == "\\" {
 			return nil
 		}
 		require.NoError(t, err)
-		contents, err := afero.ReadFile(fs, filePath)
+		contents, err := afero.ReadFile(fileSystem, filePath)
 		require.NoError(t, err)
 		result[filePath] = bytes.NewBuffer(contents)
 		return nil
 	}
 
-	err := fsext.Walk(fs, afero.FilePathSeparator, filepath.WalkFunc(walkFn))
+	err := fsext.Walk(fileSystem, afero.FilePathSeparator, filepath.WalkFunc(walkFn))
 	require.NoError(t, err)
 
 	return result
 }
 
 func assertEqual(t *testing.T, exp string, actual io.Reader) {
-	act, err := ioutil.ReadAll(actual)
+	act, err := io.ReadAll(actual)
 	require.NoError(t, err)
 	assert.Equal(t, []byte(exp), act)
 }
@@ -318,7 +317,7 @@ func TestThresholdsRuntimeBehavior(t *testing.T) {
 			}
 
 			if tc.expStdoutNotContains != "" {
-				log.Println(ts.Stdout.String())
+				t.Log(ts.Stdout.String())
 				assert.NotContains(t, ts.Stdout.String(), tc.expStdoutNotContains)
 			}
 		})

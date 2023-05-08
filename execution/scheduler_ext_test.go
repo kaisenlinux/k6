@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/url"
 	"reflect"
@@ -58,7 +58,7 @@ func getTestRunState(
 }
 
 func newTestScheduler(
-	t *testing.T, runner lib.Runner, logger *logrus.Logger, opts lib.Options,
+	t *testing.T, runner lib.Runner, logger logrus.FieldLogger, opts lib.Options,
 ) (ctx context.Context, cancel func(), execScheduler *execution.Scheduler, samples chan metrics.SampleContainer) {
 	if runner == nil {
 		runner = &minirunner.MiniRunner{}
@@ -154,11 +154,11 @@ func TestSchedulerRunNonDefault(t *testing.T) {
 
 			stopEmission, err := execScheduler.Init(ctx, samples)
 			require.NoError(t, err)
-			defer stopEmission()
 
 			go func() {
+				defer close(done)
+				defer stopEmission()
 				assert.NoError(t, execScheduler.Run(ctx, ctx, samples))
-				close(done)
 			}()
 			for {
 				select {
@@ -271,11 +271,11 @@ func TestSchedulerRunEnv(t *testing.T) {
 
 			stopEmission, err := execScheduler.Init(ctx, samples)
 			require.NoError(t, err)
-			defer stopEmission()
 
 			go func() {
+				defer close(done)
+				defer stopEmission()
 				assert.NoError(t, execScheduler.Run(ctx, ctx, samples))
-				close(done)
 			}()
 			for {
 				select {
@@ -344,11 +344,11 @@ func TestSchedulerSystemTags(t *testing.T) {
 
 	stopEmission, err := execScheduler.Init(ctx, samples)
 	require.NoError(t, err)
-	defer stopEmission()
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer stopEmission()
 		require.NoError(t, execScheduler.Run(ctx, ctx, samples))
 	}()
 
@@ -481,10 +481,10 @@ func TestSchedulerRunCustomTags(t *testing.T) {
 
 			stopEmission, err := execScheduler.Init(ctx, samples)
 			require.NoError(t, err)
-			defer stopEmission()
 
 			go func() {
 				defer close(done)
+				defer stopEmission()
 				require.NoError(t, execScheduler.Run(ctx, ctx, samples))
 			}()
 			var gotTrailTag, gotNetTrailTag bool
@@ -1082,9 +1082,9 @@ func TestDNSResolver(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
 				logger := logrus.New()
-				logger.SetOutput(ioutil.Discard)
-				logHook := testutils.SimpleLogrusHook{HookedLevels: []logrus.Level{logrus.WarnLevel}}
-				logger.AddHook(&logHook)
+				logger.SetOutput(io.Discard)
+				logHook := testutils.NewLogHook(logrus.WarnLevel)
+				logger.AddHook(logHook)
 
 				registry := metrics.NewRegistry()
 				builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
@@ -1202,11 +1202,11 @@ func TestRealTimeAndSetupTeardownMetrics(t *testing.T) {
 
 	stopEmission, err := execScheduler.Init(ctx, samples)
 	require.NoError(t, err)
-	defer stopEmission()
 
 	go func() {
+		defer close(done)
+		defer stopEmission()
 		assert.NoError(t, execScheduler.Run(ctx, ctx, samples))
-		close(done)
 	}()
 
 	expectIn := func(from, to time.Duration, expected metrics.SampleContainer) {

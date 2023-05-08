@@ -2,7 +2,7 @@ package executor
 
 import (
 	"context"
-	"io/ioutil"
+	"io"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -47,10 +47,10 @@ func setupExecutor(t testing.TB, config lib.ExecutorConfig, es *lib.ExecutionSta
 	ctx, cancel := context.WithCancel(context.Background())
 	engineOut := make(chan metrics.SampleContainer, 100) // TODO: return this for more complicated tests?
 
-	logHook := &testutils.SimpleLogrusHook{HookedLevels: []logrus.Level{logrus.WarnLevel}}
+	logHook := testutils.NewLogHook(logrus.WarnLevel)
 	testLog := logrus.New()
 	testLog.AddHook(logHook)
-	testLog.SetOutput(ioutil.Discard)
+	testLog.SetOutput(io.Discard)
 	logEntry := logrus.NewEntry(testLog)
 
 	initVUFunc := func(_ context.Context, logger *logrus.Entry) (lib.InitializedVU, error) {

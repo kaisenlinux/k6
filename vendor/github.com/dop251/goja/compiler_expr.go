@@ -118,6 +118,12 @@ type compiledAwaitExpression struct {
 	arg compiledExpr
 }
 
+type compiledYieldExpression struct {
+	baseCompiledExpr
+	arg      compiledExpr
+	delegate bool
+}
+
 type funcType uint8
 
 const (
@@ -142,7 +148,8 @@ type compiledFunctionLiteral struct {
 	homeObjOffset   uint32
 	typ             funcType
 	isExpr          bool
-	isAsync         bool
+
+	isAsync, isGenerator bool
 }
 
 type compiledBracketExpr struct {
@@ -314,6 +321,13 @@ func (c *compiler) compileExpression(v ast.Expression) compiledExpr {
 			arg: c.compileExpression(v.Argument),
 		}
 		r.init(c, v.Await)
+		return r
+	case *ast.YieldExpression:
+		r := &compiledYieldExpression{
+			arg:      c.compileExpression(v.Argument),
+			delegate: v.Delegate,
+		}
+		r.init(c, v.Yield)
 		return r
 	default:
 		c.assert(false, int(v.Idx0())-1, "Unknown expression type: %T", v)
@@ -957,6 +971,7 @@ func (e *compiledDotExpr) emitRef() {
 func (e *compiledDotExpr) emitSetter(valueExpr compiledExpr, putOnStack bool) {
 	e.left.emitGetter(true)
 	valueExpr.emitGetter(true)
+	e.addSrcMap()
 	if e.c.scope.strict {
 		if putOnStack {
 			e.c.emit(setPropStrict(e.name))
@@ -1358,8 +1373,9 @@ func (e *compiledFunctionLiteral) compile() (prg *Program, name unistring.String
 	savedPrg := e.c.p
 	preambleLen := 8 // enter, boxThis, loadStack(0), initThis, createArgs, set, loadCallee, init
 	e.c.p = &Program{
-		src:  e.c.p.src,
-		code: e.c.newCode(preambleLen, 16),
+		src:    e.c.p.src,
+		code:   e.c.newCode(preambleLen, 16),
+		srcMap: []srcMapItem{{srcPos: e.offset}},
 	}
 	e.c.newScope()
 	s := e.c.scope
@@ -1565,6 +1581,9 @@ func (e *compiledFunctionLiteral) compile() (prg *Program, name unistring.String
 	}
 
 	e.c.compileFunctions(funcs)
+	if e.isGenerator {
+		e.c.emit(yieldEmpty)
+	}
 	e.c.compileStatements(body, false)
 
 	var last ast.Statement
@@ -1714,6 +1733,7 @@ func (e *compiledFunctionLiteral) compile() (prg *Program, name unistring.String
 		}
 	}
 	code[delta] = enter
+	e.c.p.srcMap[0].pc = delta
 	s.trimCode(delta)
 
 	strict = s.strict
@@ -1741,13 +1761,21 @@ func (e *compiledFunctionLiteral) emitGetter(putOnStack bool) {
 		if e.isAsync {
 			e.c.emit(&newAsyncMethod{newMethod: newMethod{newFunc: newFunc{prg: p, length: length, name: name, source: e.source, strict: strict}, homeObjOffset: e.homeObjOffset}})
 		} else {
-			e.c.emit(&newMethod{newFunc: newFunc{prg: p, length: length, name: name, source: e.source, strict: strict}, homeObjOffset: e.homeObjOffset})
+			if e.isGenerator {
+				e.c.emit(&newGeneratorMethod{newMethod: newMethod{newFunc: newFunc{prg: p, length: length, name: name, source: e.source, strict: strict}, homeObjOffset: e.homeObjOffset}})
+			} else {
+				e.c.emit(&newMethod{newFunc: newFunc{prg: p, length: length, name: name, source: e.source, strict: strict}, homeObjOffset: e.homeObjOffset})
+			}
 		}
 	case funcRegular:
 		if e.isAsync {
 			e.c.emit(&newAsyncFunc{newFunc: newFunc{prg: p, length: length, name: name, source: e.source, strict: strict}})
 		} else {
-			e.c.emit(&newFunc{prg: p, length: length, name: name, source: e.source, strict: strict})
+			if e.isGenerator {
+				e.c.emit(&newGeneratorFunc{newFunc: newFunc{prg: p, length: length, name: name, source: e.source, strict: strict}})
+			} else {
+				e.c.emit(&newFunc{prg: p, length: length, name: name, source: e.source, strict: strict})
+			}
 		}
 	default:
 		e.c.throwSyntaxError(e.offset, "Unsupported func type: %v", e.typ)
@@ -1760,7 +1788,11 @@ func (e *compiledFunctionLiteral) emitGetter(putOnStack bool) {
 func (c *compiler) compileFunctionLiteral(v *ast.FunctionLiteral, isExpr bool) *compiledFunctionLiteral {
 	strictBody := c.isStrictStatement(v.Body)
 	if v.Name != nil && (c.scope.strict || strictBody != nil) {
+		c.checkIdentifierName(v.Name.Name, int(v.Name.Idx)-1)
 		c.checkIdentifierLName(v.Name.Name, int(v.Name.Idx)-1)
+	}
+	if v.Async && v.Generator {
+		c.throwSyntaxError(int(v.Function)-1, "Async generators are not supported yet")
 	}
 	r := &compiledFunctionLiteral{
 		name:            v.Name,
@@ -1772,6 +1804,7 @@ func (c *compiler) compileFunctionLiteral(v *ast.FunctionLiteral, isExpr bool) *
 		typ:             funcRegular,
 		strict:          strictBody,
 		isAsync:         v.Async,
+		isGenerator:     v.Generator,
 	}
 	r.init(c, v.Idx0())
 	return r
@@ -2104,7 +2137,7 @@ func (e *compiledClassLiteral) emitGetter(putOnStack bool) {
 
 	if (clsBinding != nil && clsBinding.useCount() > 0) || s.dynLookup {
 		if clsBinding != nil {
-			// Because this block may be in the middle of an expression, it's initial stack position
+			// Because this block may be in the middle of an expression, its initial stack position
 			// cannot be known, and therefore it may not have any stack variables.
 			// Note, because clsBinding would be accessed through a function, it should already be in stash,
 			// this is just to make sure.
@@ -2451,7 +2484,9 @@ func (c *compiler) evalConst(expr compiledExpr) (Value, *Exception) {
 	var savedPrg *Program
 	createdPrg := false
 	if c.evalVM.prg == nil {
-		c.evalVM.prg = &Program{}
+		c.evalVM.prg = &Program{
+			src: c.p.src,
+		}
 		savedPrg = c.p
 		c.p = c.evalVM.prg
 		createdPrg = true
@@ -3546,8 +3581,29 @@ func (e *compiledOptional) emitGetter(putOnStack bool) {
 
 func (e *compiledAwaitExpression) emitGetter(putOnStack bool) {
 	e.arg.emitGetter(true)
-	e.c.emit(await{})
+	e.c.emit(await)
 	if !putOnStack {
 		e.c.emit(pop)
+	}
+}
+
+func (e *compiledYieldExpression) emitGetter(putOnStack bool) {
+	if e.arg != nil {
+		e.arg.emitGetter(true)
+	} else {
+		e.c.emit(loadUndef)
+	}
+	if putOnStack {
+		if e.delegate {
+			e.c.emit(yieldDelegateRes)
+		} else {
+			e.c.emit(yieldRes)
+		}
+	} else {
+		if e.delegate {
+			e.c.emit(yieldDelegate)
+		} else {
+			e.c.emit(yield)
+		}
 	}
 }

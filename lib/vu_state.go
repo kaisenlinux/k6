@@ -8,7 +8,6 @@ import (
 	"net/http/cookiejar"
 	"sync"
 
-	"github.com/oxtoacart/bpool"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/time/rate"
 
@@ -34,9 +33,8 @@ type State struct {
 	Options        Options
 	BuiltinMetrics *metrics.BuiltinMetrics
 
-	// Logger. Avoid using the global logger.
-	// TODO: change to logrus.FieldLogger when there is time to fix all the tests
-	Logger *logrus.Logger
+	// Logger instance for every VU.
+	Logger logrus.FieldLogger
 
 	// Current group; all emitted metrics are tagged with this.
 	Group *Group
@@ -57,8 +55,7 @@ type State struct {
 	Samples chan<- metrics.SampleContainer
 
 	// Buffer pool; use instead of allocating fresh buffers when possible.
-	// TODO: maybe use https://golang.org/pkg/sync/#Pool ?
-	BPool *bpool.BufferPool
+	BufferPool *BufferPool
 
 	VUID, VUIDGlobal uint64
 	Iteration        int64
