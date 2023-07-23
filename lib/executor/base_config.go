@@ -8,6 +8,7 @@ import (
 
 	"gopkg.in/guregu/null.v3"
 
+	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/consts"
 	"go.k6.io/k6/lib/types"
 )
@@ -22,13 +23,14 @@ const executorNameErr = "the executor name should contain only numbers, latin le
 
 // BaseConfig contains the common config fields for all executors
 type BaseConfig struct {
-	Name         string             `json:"-"` // set via the JS object key
-	Type         string             `json:"executor"`
-	StartTime    types.NullDuration `json:"startTime"`
-	GracefulStop types.NullDuration `json:"gracefulStop"`
-	Env          map[string]string  `json:"env"`
-	Exec         null.String        `json:"exec"` // function name, externally validated
-	Tags         map[string]string  `json:"tags"`
+	Name         string               `json:"-"` // set via the JS object key
+	Type         string               `json:"executor"`
+	StartTime    types.NullDuration   `json:"startTime"`
+	GracefulStop types.NullDuration   `json:"gracefulStop"`
+	Env          map[string]string    `json:"env"`
+	Exec         null.String          `json:"exec"` // function name, externally validated
+	Tags         map[string]string    `json:"tags"`
+	Options      *lib.ScenarioOptions `json:"options,omitempty"`
 
 	// TODO: future extensions like distribution, others?
 }
@@ -107,6 +109,11 @@ func (bc BaseConfig) GetExec() string {
 		exec = consts.DefaultFn
 	}
 	return exec
+}
+
+// GetScenarioOptions returns the options specific to a scenario.
+func (bc BaseConfig) GetScenarioOptions() *lib.ScenarioOptions {
+	return bc.Options
 }
 
 // GetTags returns any custom tags configured for the executor.

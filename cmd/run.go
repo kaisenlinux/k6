@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
@@ -28,6 +27,7 @@ import (
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/consts"
+	"go.k6.io/k6/lib/fsext"
 	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/metrics/engine"
 	"go.k6.io/k6/output"
@@ -192,14 +192,14 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 			}
 			tErr := errext.WithAbortReasonIfNone(
 				errext.WithExitCodeIfNone(
-					fmt.Errorf("thresholds on metrics '%s' have been breached", strings.Join(breachedThresholds, ", ")),
+					fmt.Errorf("thresholds on metrics '%s' have been crossed", strings.Join(breachedThresholds, ", ")),
 					exitcodes.ThresholdsHaveFailed,
 				), errext.AbortedByThresholdsAfterTestEnd)
 
 			if err == nil {
 				err = tErr
 			} else {
-				logger.WithError(tErr).Debug("Breached thresholds, but test already exited with another error")
+				logger.WithError(tErr).Debug("Crossed thresholds, but test already exited with another error")
 			}
 		}
 		if finalizeThresholds != nil {
@@ -366,7 +366,7 @@ func getCmdRun(gs *state.GlobalState) *cobra.Command {
   {{.}} run -u 5 -d 10s script.js
 
   # Ramp VUs from 0 to 100 over 10s, stay there for 60s, then 10s down to 0.
-  {{.}} run -u 0 -s 10s:100 -s 60s -s 10s:0
+  {{.}} run -u 0 -s 10s:100 -s 60s:100 -s 10s:0
 
   # Send metrics to an influxdb server
   {{.}} run -o influxdb=http://1.2.3.4:8086/k6`[1:])
@@ -422,7 +422,7 @@ func reportUsage(ctx context.Context, execScheduler *execution.Scheduler) error 
 	return err
 }
 
-func handleSummaryResult(fs afero.Fs, stdOut, stdErr io.Writer, result map[string]io.Reader) error {
+func handleSummaryResult(fs fsext.Fs, stdOut, stdErr io.Writer, result map[string]io.Reader) error {
 	var errs []error
 
 	getWriter := func(path string) (io.Writer, error) {

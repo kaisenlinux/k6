@@ -2,7 +2,7 @@ package data
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.k6.io/k6/js/common"
+	"go.k6.io/k6/js/compiler"
 	"go.k6.io/k6/js/modulestest"
 )
 
@@ -25,34 +26,35 @@ var array = new data.SharedArray("shared",function() {
 });
 `
 
-func newConfiguredRuntime() (*goja.Runtime, error) {
-	rt := goja.New()
-	rt.SetFieldNameMapper(common.FieldNameMapper{})
+const initGlobals = `
+	globalThis.data = require("k6/data");
+	globalThis.SharedArray = data.SharedArray;
+`
 
-	m, ok := New().NewModuleInstance(
-		&modulestest.VU{
-			RuntimeField: rt,
-			InitEnvField: &common.InitEnvironment{},
-			CtxField:     context.Background(),
-			StateField:   nil,
-		},
-	).(*Data)
-	if !ok {
-		return rt, fmt.Errorf("not a Data module instance")
-	}
+func newConfiguredRuntime(t testing.TB) (*modulestest.Runtime, error) {
+	runtime := modulestest.NewRuntime(t)
 
-	err := rt.Set("data", m.Exports().Named)
+	err := runtime.SetupModuleSystem(map[string]interface{}{"k6/data": New()}, nil, compiler.New(runtime.VU.InitEnv().Logger))
 	if err != nil {
-		return rt, err //nolint:wrapcheck
+		return nil, err
 	}
-	_, err = rt.RunString("var SharedArray = data.SharedArray;")
-	return rt, err //nolint:wrapcheck
+	_, err = runtime.VU.Runtime().RunString(initGlobals)
+	return runtime, err
+}
+
+func configuredRuntimeFromAnother(t testing.TB, another *modulestest.Runtime) (*modulestest.Runtime, error) {
+	runtime := modulestest.NewRuntime(t)
+	err := runtime.SetupModuleSystemFromAnother(another)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = runtime.VU.Runtime().RunString(initGlobals)
+	return runtime, err
 }
 
 func TestSharedArrayConstructorExceptions(t *testing.T) {
 	t.Parallel()
-	rt, err := newConfiguredRuntime()
-	require.NoError(t, err)
 	cases := map[string]struct {
 		code, err string
 	}{
@@ -77,19 +79,31 @@ func TestSharedArrayConstructorExceptions(t *testing.T) {
 			code: `var s = new SharedArray("wat3", "astring");`,
 			err:  "a function is expected",
 		},
+		"async function": {
+			code: `var s = new SharedArray("wat3", async function() {});`,
+			err:  "SharedArray constructor does not support async functions as second argument",
+		},
+		"async lambda": {
+			code: `var s = new SharedArray("wat3", async () => {});`,
+			err:  "SharedArray constructor does not support async functions as second argument",
+		},
 	}
 
 	for name, testCase := range cases {
 		name, testCase := name, testCase
 		t.Run(name, func(t *testing.T) {
-			_, err := rt.RunString(testCase.code)
+			t.Parallel()
+			runtime, err := newConfiguredRuntime(t)
+			require.NoError(t, err)
+			_, err = runtime.VU.Runtime().RunString(testCase.code)
 			if testCase.err == "" {
 				require.NoError(t, err)
 				return // the t.Run
 			}
 
 			require.Error(t, err)
-			exc := err.(*goja.Exception)
+			exc := new(goja.Exception)
+			require.True(t, errors.As(err, &exc))
 			require.Contains(t, exc.Error(), testCase.err)
 		})
 	}
@@ -97,16 +111,6 @@ func TestSharedArrayConstructorExceptions(t *testing.T) {
 
 func TestSharedArrayAnotherRuntimeExceptions(t *testing.T) {
 	t.Parallel()
-
-	rt, err := newConfiguredRuntime()
-	require.NoError(t, err)
-	_, err = rt.RunString(makeArrayScript)
-	require.NoError(t, err)
-
-	rt, err = newConfiguredRuntime()
-	require.NoError(t, err)
-	_, err = rt.RunString(makeArrayScript)
-	require.NoError(t, err)
 
 	// use strict is required as otherwise just nothing happens
 	cases := map[string]struct {
@@ -133,14 +137,27 @@ func TestSharedArrayAnotherRuntimeExceptions(t *testing.T) {
 	for name, testCase := range cases {
 		name, testCase := name, testCase
 		t.Run(name, func(t *testing.T) {
-			_, err := rt.RunString(testCase.code)
+			t.Parallel()
+			testRuntime, err := newConfiguredRuntime(t)
+			rt := testRuntime.VU.Runtime()
+			require.NoError(t, err)
+			_, err = rt.RunString(makeArrayScript)
+			require.NoError(t, err)
+
+			testRuntime, err = configuredRuntimeFromAnother(t, testRuntime)
+			rt = testRuntime.VU.Runtime()
+			require.NoError(t, err)
+			_, err = rt.RunString(makeArrayScript)
+			require.NoError(t, err)
+			_, err = rt.RunString(testCase.code)
 			if testCase.err == "" {
 				require.NoError(t, err)
 				return // the t.Run
 			}
 
 			require.Error(t, err)
-			exc := err.(*goja.Exception)
+			exc := new(goja.Exception)
+			require.True(t, errors.As(err, &exc))
 			require.Contains(t, exc.Error(), testCase.err)
 		})
 	}
@@ -209,9 +226,9 @@ func TestSharedArrayRaceInInitialization(t *testing.T) {
 	for i := 0; i < repeats; i++ {
 		runtimes := make([]*goja.Runtime, instances)
 		for j := 0; j < instances; j++ {
-			rt, err := newConfiguredRuntime()
+			runtime, err := newConfiguredRuntime(t)
 			require.NoError(t, err)
-			runtimes[j] = rt
+			runtimes[j] = runtime.VU.Runtime()
 		}
 		var wg sync.WaitGroup
 		for _, rt := range runtimes {

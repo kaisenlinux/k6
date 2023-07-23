@@ -26,7 +26,7 @@ import (
 )
 
 func BenchmarkAggregateHTTP(b *testing.B) {
-	out, err := newOutput(output.Params{
+	out, err := newTestOutput(output.Params{
 		Logger:     testutils.NewLogger(b),
 		JSONConfig: json.RawMessage(`{"noCompress": true, "aggregationCalcInterval": "200ms","aggregationPeriod": "200ms"}`),
 		ScriptOptions: lib.Options{
@@ -262,6 +262,7 @@ func generateSamples(registry *metrics.Registry, count int) []*Sample {
 }
 
 func generateHTTPExtTrail(now time.Time, i time.Duration, tags *metrics.TagSet) *httpext.Trail {
+	//nolint:durationcheck
 	return &httpext.Trail{
 		Blocked:        i % 200 * 100 * time.Millisecond,
 		Connecting:     i % 200 * 200 * time.Millisecond,
@@ -291,7 +292,7 @@ func BenchmarkHTTPPush(b *testing.B) {
 		},
 	)
 
-	out, err := newOutput(output.Params{
+	out, err := newTestOutput(output.Params{
 		Logger: testutils.NewLogger(b),
 		JSONConfig: json.RawMessage(fmt.Sprintf(`{
 "host": "%s",

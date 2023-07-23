@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -26,6 +25,7 @@ import (
 	"go.k6.io/k6/cmd"
 	"go.k6.io/k6/errext/exitcodes"
 	"go.k6.io/k6/lib/consts"
+	"go.k6.io/k6/lib/fsext"
 	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/lib/testutils/httpmultibin"
 )
@@ -166,7 +166,7 @@ func TestStdoutAndStderrAreEmptyWithQuietAndLogsForwarded(t *testing.T) {
 	assert.Empty(t, ts.Stdout.Bytes())
 
 	// Instead it should be in the log file
-	logContents, err := afero.ReadFile(ts.FS, logFilePath)
+	logContents, err := fsext.ReadFile(ts.FS, logFilePath)
 	require.NoError(t, err)
 	assert.Equal(t, "init\ninit\nfoo\n", string(logContents)) //nolint:dupword
 }
@@ -192,7 +192,7 @@ func TestRelativeLogPathWithSetupAndTeardown(t *testing.T) {
 	assert.True(t, testutils.LogContains(logEntries, logrus.InfoLevel, `baz`))
 
 	// And check that the log file also contains everything
-	logContents, err := afero.ReadFile(ts.FS, filepath.Join(ts.Cwd, "test.log"))
+	logContents, err := fsext.ReadFile(ts.FS, filepath.Join(ts.Cwd, "test.log"))
 	require.NoError(t, err)
 	assert.Equal(t, "init\ninit\ninit\nbar\nfoo\nfoo\ninit\nbaz\ninit\n", string(logContents)) //nolint:dupword
 }
@@ -233,7 +233,7 @@ func getSingleFileTestState(tb testing.TB, script string, cliFlags []string, exp
 	}
 
 	ts := NewGlobalTestState(tb)
-	require.NoError(tb, afero.WriteFile(ts.FS, filepath.Join(ts.Cwd, "test.js"), []byte(script), 0o644))
+	require.NoError(tb, fsext.WriteFile(ts.FS, filepath.Join(ts.Cwd, "test.js"), []byte(script), 0o644))
 	ts.CmdArgs = append(append([]string{"k6", "run"}, cliFlags...), "test.js")
 	ts.ExpectedExitCode = int(expExitCode)
 
@@ -369,7 +369,7 @@ func testSSLKEYLOGFILE(t *testing.T, ts *GlobalTestState, filePath string) {
 
 	assert.True(t,
 		testutils.LogContains(ts.LoggerHook.Drain(), logrus.WarnLevel, "SSLKEYLOGFILE was specified"))
-	sslloglines, err := afero.ReadFile(ts.FS, filepath.Join(ts.Cwd, "ssl.log"))
+	sslloglines, err := fsext.ReadFile(ts.FS, filepath.Join(ts.Cwd, "ssl.log"))
 	require.NoError(t, err)
 	// TODO maybe have multiple depending on the ciphers used as that seems to change it
 	assert.Regexp(t, "^CLIENT_[A-Z_]+ [0-9a-f]+ [0-9a-f]+\n", string(sslloglines))
@@ -655,7 +655,7 @@ func TestThresholdsFailed(t *testing.T) {
 	)
 	cmd.ExecuteWithGlobalState(ts.GlobalState)
 
-	expErr := "thresholds on metrics 'iterations{scenario:sc1}, iterations{scenario:sc2}' have been breached"
+	expErr := "thresholds on metrics 'iterations{scenario:sc1}, iterations{scenario:sc2}' have been crossed"
 	assert.True(t, testutils.LogContains(ts.LoggerHook.Drain(), logrus.ErrorLevel, expErr))
 	stdout := ts.Stdout.String()
 	t.Log(stdout)
@@ -697,7 +697,7 @@ func TestAbortedByThreshold(t *testing.T) {
 	)
 	cmd.ExecuteWithGlobalState(ts.GlobalState)
 
-	expErr := "thresholds on metrics 'iterations' were breached; at least one has abortOnFail enabled, stopping test prematurely"
+	expErr := "thresholds on metrics 'iterations' were crossed; at least one has abortOnFail enabled, stopping test prematurely"
 	assert.True(t, testutils.LogContains(ts.LoggerHook.Drain(), logrus.ErrorLevel, expErr))
 	stdOut := ts.Stdout.String()
 	t.Log(stdOut)
@@ -918,8 +918,8 @@ func TestAbortedByScriptSetupErrorWithDependency(t *testing.T) {
 	srv := getCloudTestEndChecker(t, 123, nil, cloudapi.RunStatusAbortedScriptError, cloudapi.ResultStatusPassed)
 
 	ts := NewGlobalTestState(t)
-	require.NoError(t, afero.WriteFile(ts.FS, filepath.Join(ts.Cwd, "test.js"), []byte(mainScript), 0o644))
-	require.NoError(t, afero.WriteFile(ts.FS, filepath.Join(ts.Cwd, "bar.js"), []byte(depScript), 0o644))
+	require.NoError(t, fsext.WriteFile(ts.FS, filepath.Join(ts.Cwd, "test.js"), []byte(mainScript), 0o644))
+	require.NoError(t, fsext.WriteFile(ts.FS, filepath.Join(ts.Cwd, "bar.js"), []byte(depScript), 0o644))
 
 	ts.Env["K6_CLOUD_HOST"] = srv.URL
 	ts.CmdArgs = []string{"k6", "run", "-v", "--out", "cloud", "--log-output=stdout", "test.js"}
@@ -1487,7 +1487,7 @@ func TestActiveVUsCount(t *testing.T) {
 	stdout := ts.Stdout.String()
 	t.Log(stdout)
 
-	jsonResults, err := afero.ReadFile(ts.FS, "results.json")
+	jsonResults, err := fsext.ReadFile(ts.FS, "results.json")
 	require.NoError(t, err)
 	// t.Log(string(jsonResults))
 	assert.Equal(t, float64(10), max(getSampleValues(t, jsonResults, "vus_max", nil)))
@@ -1541,6 +1541,44 @@ func TestMinIterationDuration(t *testing.T) {
 	stdout := ts.Stdout.String()
 	t.Log(stdout)
 	assert.Contains(t, stdout, "✓ test_counter.........: 3")
+}
+
+func TestMetricNameWarning(t *testing.T) {
+	t.Parallel()
+	script := `
+		import { Counter } from 'k6/metrics';
+
+		export let options = {
+			vus: 2,
+			iterations: 2,
+			thresholds: {
+				'test counter': ['count == 4'],
+			},
+		};
+
+		var c = new Counter('test counter');
+		new Counter('test_counter_#');
+
+		export function setup() { c.add(1); };
+		export default function () { c.add(1); };
+		export function teardown() { c.add(1); };
+	`
+
+	ts := getSimpleCloudOutputTestState(t, script, nil, cloudapi.RunStatusFinished, cloudapi.ResultStatusPassed, 0)
+
+	cmd.ExecuteWithGlobalState(ts.GlobalState)
+
+	stdout := ts.Stdout.String()
+	t.Log(stdout)
+
+	logEntries := ts.LoggerHook.Drain()
+	expectedMsg := `Metric name should only include ASCII letters, numbers and underscores. This name will stop working in `
+	filteredEntries := testutils.FilterEntries(logEntries, logrus.WarnLevel, expectedMsg)
+	require.Len(t, filteredEntries, 2)
+	// we do it this way as ordering is not guaranteed
+	names := []interface{}{filteredEntries[0].Data["name"], filteredEntries[1].Data["name"]}
+	require.Contains(t, names, "test counter")
+	require.Contains(t, names, "test_counter_#")
 }
 
 func TestRunTags(t *testing.T) {
@@ -1615,7 +1653,7 @@ func TestRunTags(t *testing.T) {
 	stdout := ts.Stdout.String()
 	t.Log(stdout)
 
-	jsonResults, err := afero.ReadFile(ts.FS, "results.json")
+	jsonResults, err := fsext.ReadFile(ts.FS, "results.json")
 	require.NoError(t, err)
 
 	expTags := map[string]string{"foo": "bar", "test": "mest", "over": "written", "scenario": "default"}
@@ -1676,17 +1714,33 @@ func TestRunWithCloudOutputOverrides(t *testing.T) {
 	assert.Contains(t, stdout, "iterations...........: 1")
 }
 
-func TestRunWithCloudOutputMoreOverrides(t *testing.T) {
+func TestRunWithCloudOutputCustomConfigAndOverrides(t *testing.T) {
 	t.Parallel()
 
-	ts := getSingleFileTestState(
-		t, "export default function () {};",
-		[]string{"-v", "--log-output=stdout", "--out=cloud"}, 0,
-	)
+	script := `
+export const options = {
+  ext: {
+    loadimpact: {
+      name: 'Hello k6 Cloud!',
+      projectID: 123456,
+    },
+  },
+};
+
+export default function() {};`
+
+	ts := getSingleFileTestState(t, script, []string{"-v", "--log-output=stdout", "--out=cloud"}, 0)
 
 	configOverride := http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		b, err := io.ReadAll(req.Body)
+		require.NoError(t, err)
+
+		bjs := string(b)
+		assert.Contains(t, bjs, `"name":"Hello k6 Cloud!"`)
+		assert.Contains(t, bjs, `"project_id":123456`)
+
 		resp.WriteHeader(http.StatusOK)
-		_, err := fmt.Fprint(resp, `{
+		_, err = fmt.Fprint(resp, `{
 			"reference_id": "1337",
 			"config": {
 				"webAppURL": "https://bogus.url",
@@ -1741,7 +1795,7 @@ func BenchmarkReadResponseBody(b *testing.B) {
 			duration: '10s',
 			vus: 10
 		};
-		
+
 		export default function () {
 			let bytes = randomIntBetween(100 * 1024, 5 * 1024 * 1024)
 
@@ -1760,7 +1814,7 @@ func BenchmarkReadResponseBody(b *testing.B) {
 			responses.forEach(res => check(res, statusCheck))
 			sleep(0.1)
 		};
-		
+
 		function randomIntBetween(min, max) {
 			return Math.floor(Math.random() * (max - min + 1) + min);
 		}
@@ -1908,7 +1962,7 @@ func TestRunStaticArchives(t *testing.T) {
 			data, err := os.ReadFile(filepath.Join("testdata/archives", tc.archive)) //nolint:forbidigo // it's a test
 			require.NoError(t, err)
 
-			require.NoError(t, afero.WriteFile(ts.FS, filepath.Join(ts.Cwd, "archive.tar"), data, 0o644))
+			require.NoError(t, fsext.WriteFile(ts.FS, filepath.Join(ts.Cwd, "archive.tar"), data, 0o644))
 
 			ts.CmdArgs = []string{"k6", "run", "--log-output=stdout", "archive.tar"}
 

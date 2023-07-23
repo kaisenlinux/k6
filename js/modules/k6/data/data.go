@@ -1,3 +1,5 @@
+// Package data implements `k6/data` js module for k6.
+// This modules provide utility types to work with data in an efficient way.
 package data
 
 import (
@@ -61,6 +63,8 @@ func (d *Data) Exports() modules.Exports {
 	}
 }
 
+const asyncFunctionNotSupportedMsg = "SharedArray constructor does not support async functions as second argument"
+
 // sharedArray is a constructor returning a shareable read-only array
 // indentified by the name and having their contents be whatever the call returns
 func (d *Data) sharedArray(call goja.ConstructorCall) *goja.Object {
@@ -74,8 +78,13 @@ func (d *Data) sharedArray(call goja.ConstructorCall) *goja.Object {
 	if name == "" {
 		common.Throw(rt, errors.New("empty name provided to SharedArray's constructor"))
 	}
+	val := call.Argument(1)
 
-	fn, ok := goja.AssertFunction(call.Argument(1))
+	if common.IsAsyncFunction(rt, val) {
+		common.Throw(rt, errors.New(asyncFunctionNotSupportedMsg))
+	}
+
+	fn, ok := goja.AssertFunction(val)
 	if !ok {
 		common.Throw(rt, errors.New("a function is expected as the second argument of SharedArray's constructor"))
 	}
