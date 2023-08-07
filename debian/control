@@ -13,5 +13,4 @@ Package: k6
 Architecture: amd64 arm64
 Depends: ${shlibs:Depends},
 	 ${misc:Depends},
-	 golang-go (>= 1.17),
 Description: A modern load testing tool, using Go and JavaScript

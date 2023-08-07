@@ -1,3 +1,11 @@
+k6 (0.45.1-1kaisen) kaisen-packages; urgency=medium
+
+  * Import the 0.45.1 release
+  * Update the quilt patch
+  * Remove golang-go as package dependancy
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Mon, 07 Aug 2023 13:42:56 +0100
+
 k6 (0.45.0-1kaisen) kaisen-packages; urgency=medium
 
   * Import the 0.45.0 release
