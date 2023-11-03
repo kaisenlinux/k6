@@ -15,6 +15,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"gopkg.in/guregu/null.v3"
 
+	"go.k6.io/k6/event"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/compiler"
 	"go.k6.io/k6/js/eventloop"
@@ -45,8 +46,10 @@ type Bundle struct {
 // https://github.com/grafana/k6/issues/3065
 func (b *Bundle) checkMetricNamesForPrometheusCompatibility() {
 	const (
-		nameRegexString = "^[a-zA-Z_][a-zA-Z0-9_]{1,63}$"
-		badNameWarning  = "Metric name should only include ASCII letters, numbers and underscores. " +
+		// The name restrictions are the union of Otel and Prometheus naming restrictions, with the length restrictions of 128
+		// coming from old k6 restrictions where character set was way bigger though.
+		nameRegexString = "^[a-zA-Z_][a-zA-Z0-9_]{1,128}$"
+		badNameWarning  = "Metric name should only include up to 128 ASCII letters, numbers and/or underscores. " +
 			"This name will stop working in k6 v0.48.0 (around December 2023)."
 	)
 
@@ -112,7 +115,14 @@ func newBundle(
 	// Instantiate the bundle into a new VM using a bound init context. This uses a context with a
 	// runtime, but no state, to allow module-provided types to function within the init context.
 	// TODO use a real context
-	vuImpl := &moduleVUImpl{ctx: context.Background(), runtime: goja.New()}
+	vuImpl := &moduleVUImpl{
+		ctx:     context.Background(),
+		runtime: goja.New(),
+		events: events{
+			global: piState.Events,
+			local:  event.NewEventSystem(100, piState.Logger),
+		},
+	}
 	vuImpl.eventLoop = eventloop.New(vuImpl)
 	exports, err := bundle.instantiate(vuImpl, 0)
 	if err != nil {
@@ -220,7 +230,14 @@ func (b *Bundle) populateExports(updateOptions bool, exports *goja.Object) error
 func (b *Bundle) Instantiate(ctx context.Context, vuID uint64) (*BundleInstance, error) {
 	// Instantiate the bundle into a new VM using a bound init context. This uses a context with a
 	// runtime, but no state, to allow module-provided types to function within the init context.
-	vuImpl := &moduleVUImpl{ctx: ctx, runtime: goja.New()}
+	vuImpl := &moduleVUImpl{
+		ctx:     ctx,
+		runtime: goja.New(),
+		events: events{
+			global: b.preInitState.Events,
+			local:  event.NewEventSystem(100, b.preInitState.Logger),
+		},
+	}
 	vuImpl.eventLoop = eventloop.New(vuImpl)
 	exports, err := b.instantiate(vuImpl, vuID)
 	if err != nil {
@@ -304,7 +321,7 @@ func (b *Bundle) instantiate(vuImpl *moduleVUImpl, vuID uint64) (*goja.Object, e
 	var exportsV goja.Value
 	err = common.RunWithPanicCatching(b.preInitState.Logger, rt, func() error {
 		return vuImpl.eventLoop.Start(func() error {
-			//nolint:shadow,govet // here we shadow err on purpose
+			//nolint:govet // here we shadow err on purpose
 			var err error
 			exportsV, err = modSys.RunSourceData(b.sourceData)
 			return err

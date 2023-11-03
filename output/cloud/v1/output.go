@@ -3,16 +3,20 @@
 package cloud
 
 import (
+	"context"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
-	easyjson "github.com/mailru/easyjson"
+	"github.com/mailru/easyjson"
 	"github.com/sirupsen/logrus"
 
 	"go.k6.io/k6/cloudapi"
+	"go.k6.io/k6/cloudapi/insights"
 	"go.k6.io/k6/errext"
 	"go.k6.io/k6/errext/exitcodes"
+	insightsOutput "go.k6.io/k6/output/cloud/insights"
 
 	"go.k6.io/k6/lib/netext"
 	"go.k6.io/k6/lib/netext/httpext"
@@ -24,12 +28,19 @@ type Output struct {
 	logger logrus.FieldLogger
 	config cloudapi.Config
 
+	// referenceID is the legacy name used by the Backend for the test run id.
+	// Note: This output's version is almost deprecated so we don't apply
+	// the renaming to its internals.
 	referenceID string
 	client      *MetricsClient
 
 	bufferMutex      sync.Mutex
 	bufferHTTPTrails []*httpext.Trail
 	bufferSamples    []*Sample
+
+	insightsClient            insightsOutput.Client
+	requestMetadatasCollector insightsOutput.RequestMetadatasCollector
+	requestMetadatasFlusher   insightsOutput.RequestMetadatasFlusher
 
 	// TODO: optimize this
 	//
@@ -65,8 +76,8 @@ func New(logger logrus.FieldLogger, conf cloudapi.Config, testAPIClient *cloudap
 	}, nil
 }
 
-// SetReferenceID sets the passed Reference ID.
-func (out *Output) SetReferenceID(id string) {
+// SetTestRunID sets the passed test run id.
+func (out *Output) SetTestRunID(id string) {
 	out.referenceID = id
 }
 
@@ -96,6 +107,29 @@ func (out *Output) Start() error {
 				}
 			}
 		}()
+	}
+
+	if insightsOutput.Enabled(out.config) {
+		testRunID, err := strconv.ParseInt(out.referenceID, 10, 64)
+		if err != nil {
+			return err
+		}
+		out.requestMetadatasCollector = insightsOutput.NewCollector(testRunID)
+
+		insightsClientConfig := insights.NewDefaultClientConfigForTestRun(
+			out.config.TracesHost.String,
+			out.config.Token.String,
+			testRunID,
+		)
+		insightsClient := insights.NewClient(insightsClientConfig)
+
+		if err := insightsClient.Dial(context.Background()); err != nil {
+			return err
+		}
+
+		out.insightsClient = insightsClient
+		out.requestMetadatasFlusher = insightsOutput.NewFlusher(insightsClient, out.requestMetadatasCollector)
+		out.runFlushRequestMetadatas()
 	}
 
 	out.outputDone.Add(1)
@@ -133,6 +167,11 @@ func (out *Output) StopWithTestError(testErr error) error {
 	close(out.stopOutput)
 	out.outputDone.Wait()
 	out.logger.Debug("Metric emission stopped, calling cloud API...")
+	if insightsOutput.Enabled(out.config) {
+		if err := out.insightsClient.Close(); err != nil {
+			out.logger.WithError(err).Error("Failed to close the insights client")
+		}
+	}
 	return nil
 }
 
@@ -218,6 +257,10 @@ func (out *Output) AddMetricSamples(sampleContainers []metrics.SampleContainer) 
 		out.bufferSamples = append(out.bufferSamples, newSamples...)
 		out.bufferHTTPTrails = append(out.bufferHTTPTrails, newHTTPTrails...)
 		out.bufferMutex.Unlock()
+	}
+
+	if insightsOutput.Enabled(out.config) {
+		out.requestMetadatasCollector.CollectRequestMetadatas(sampleContainers)
 	}
 }
 
@@ -467,6 +510,46 @@ func (out *Output) pushMetrics() {
 		"samples": count,
 		"t":       time.Since(start),
 	}).Debug("Pushing metrics to cloud finished")
+}
+
+func (out *Output) runFlushRequestMetadatas() {
+	t := time.NewTicker(out.config.TracesPushInterval.TimeDuration())
+
+	for i := int64(0); i < out.config.TracesPushConcurrency.Int64; i++ {
+		out.outputDone.Add(1)
+		go func() {
+			defer out.outputDone.Done()
+			defer t.Stop()
+
+			for {
+				select {
+				case <-out.stopSendingMetrics:
+					return
+				default:
+				}
+				select {
+				case <-out.stopOutput:
+					out.flushRequestMetadatas()
+					return
+				case <-t.C:
+					out.flushRequestMetadatas()
+				}
+			}
+		}()
+	}
+}
+
+func (out *Output) flushRequestMetadatas() {
+	start := time.Now()
+
+	err := out.requestMetadatasFlusher.Flush()
+	if err != nil {
+		out.logger.WithError(err).WithField("t", time.Since(start)).Error("Failed to push trace samples to the cloud")
+
+		return
+	}
+
+	out.logger.WithField("t", time.Since(start)).Debug("Successfully flushed buffered trace samples to the cloud")
 }
 
 const expectedGzipRatio = 6 // based on test it is around 6.8, but we don't need to be that accurate

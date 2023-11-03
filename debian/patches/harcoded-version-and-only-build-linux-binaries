@@ -1,27 +1,24 @@
 Author: Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>
 
---- k6-0.45.0.orig/build-release.sh
-+++ k6-0.45.0/build-release.sh
-@@ -7,10 +7,10 @@ eval "$(go env)"
+--- k6-0.47.0.orig/build-release.sh
++++ k6-0.47.0/build-release.sh
+@@ -7,7 +7,7 @@ eval "$(go env)"
  set -x
  export OUT_DIR="${1-dist}"
  # To override the latest git tag as the version, pass something else as the second arg.
 -export VERSION=${2:-$(git describe --tags --always --dirty)}
-+export VERSION=0.45.1
++export VERSION=0.47.0
  
- # To overwrite the version details, pass something as the third arg. Empty string disables it.
--export VERSION_DETAILS=${3-"$(date -u +"%FT%T%z")/$(git describe --tags --always --long --dirty)"}
-+export VERSION_DETAILS=${3-"$(date -u +"%FT%T%z")"}
  set +x
  
- build() {
-@@ -80,8 +80,5 @@ echo "--- Building Release: ${VERSION}"
+@@ -75,8 +75,5 @@ echo "--- Building Release: ${VERSION}"
  
  mkdir -p "$OUT_DIR"
  
 -build linux-amd64   ""      tgz,rpm,deb     GOOS=linux,GOARCH=amd64,CGO_ENABLED=0
-+build linux-amd64   ""      tgz             GOOS=linux,GOARCH=amd64,CGO_ENABLED=0
- build linux-arm64   ""      tgz             GOOS=linux,GOARCH=arm64,CGO_ENABLED=0 # TODO: package rpm and dep too
+-build linux-arm64   ""      tgz             GOOS=linux,GOARCH=arm64,CGO_ENABLED=0 # TODO: package rpm and dep too
 -build macos-amd64   ""      zip             GOOS=darwin,GOARCH=amd64
 -build macos-arm64   ""      zip             GOOS=darwin,GOARCH=arm64
 -build windows-amd64 .exe    zip             GOOS=windows,GOARCH=amd64
++build linux-amd64   ""      tgz             GOOS=linux,GOARCH=amd64,CGO_ENABLED=0
++build linux-arm64   ""      tgz             GOOS=linux,GOARCH=arm64,CGO_ENABLED=0

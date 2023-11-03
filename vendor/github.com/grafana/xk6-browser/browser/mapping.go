@@ -4,12 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/dop251/goja"
 
 	"github.com/grafana/xk6-browser/api"
-	"github.com/grafana/xk6-browser/chromium"
 	"github.com/grafana/xk6-browser/k6error"
 	"github.com/grafana/xk6-browser/k6ext"
 
@@ -34,12 +32,8 @@ func mapBrowserToGoja(vu moduleVU) *goja.Object {
 	var (
 		rt  = vu.Runtime()
 		obj = rt.NewObject()
-		// TODO: Use k6 LookupEnv instead of OS package methods.
-		// See https://github.com/grafana/xk6-browser/issues/822.
-		wsURL, isRemoteBrowser = k6ext.IsRemoteBrowser(os.LookupEnv)
-		browserType            = chromium.NewBrowserType(vu)
 	)
-	for k, v := range mapBrowserType(vu, browserType, wsURL, isRemoteBrowser) {
+	for k, v := range mapBrowser(vu) {
 		err := obj.Set(k, rt.ToValue(v))
 		if err != nil {
 			k6common.Throw(rt, fmt.Errorf("mapping: %w", err))
@@ -512,7 +506,15 @@ func mapPage(vu moduleVU, p api.Page) mapping {
 			mf := mapFrame(vu, p.MainFrame())
 			return rt.ToValue(mf).ToObject(rt)
 		},
-		"mouse":  rt.ToValue(p.GetMouse()).ToObject(rt),
+		"mouse": rt.ToValue(p.GetMouse()).ToObject(rt),
+		"on": func(event string, handler goja.Callable) error {
+			mapMsgAndHandleEvent := func(m *api.ConsoleMessage) error {
+				mapping := mapConsoleMessage(vu, m)
+				_, err := handler(goja.Undefined(), vu.Runtime().ToValue(mapping))
+				return err
+			}
+			return p.On(event, mapMsgAndHandleEvent) //nolint:wrapcheck
+		},
 		"opener": p.Opener,
 		"pause":  p.Pause,
 		"pdf":    p.Pdf,
@@ -619,18 +621,13 @@ func mapWorker(vu moduleVU, w api.Worker) mapping {
 func mapBrowserContext(vu moduleVU, bc api.BrowserContext) mapping {
 	rt := vu.Runtime()
 	return mapping{
-		"addCookies":       bc.AddCookies,
-		"addInitScript":    bc.AddInitScript,
-		"browser":          bc.Browser,
-		"clearCookies":     bc.ClearCookies,
-		"clearPermissions": bc.ClearPermissions,
-		"close":            bc.Close,
-		"cookies": func() ([]any, error) {
-			cc, err := bc.Cookies()
-			ctx := vu.Context()
-			panicIfFatalError(ctx, err)
-			return cc, err //nolint:wrapcheck
-		},
+		"addCookies":                  bc.AddCookies,
+		"addInitScript":               bc.AddInitScript,
+		"browser":                     bc.Browser,
+		"clearCookies":                bc.ClearCookies,
+		"clearPermissions":            bc.ClearPermissions,
+		"close":                       bc.Close,
+		"cookies":                     bc.Cookies,
 		"exposeBinding":               bc.ExposeBinding,
 		"exposeFunction":              bc.ExposeFunction,
 		"grantPermissions":            bc.GrantPermissions,
@@ -677,21 +674,60 @@ func mapBrowserContext(vu moduleVU, bc api.BrowserContext) mapping {
 	}
 }
 
-// mapBrowser to the JS module.
-func mapBrowser(vu moduleVU, b api.Browser) mapping {
+// mapConsoleMessage to the JS module.
+func mapConsoleMessage(vu moduleVU, cm *api.ConsoleMessage) mapping {
 	rt := vu.Runtime()
 	return mapping{
-		"close":       b.Close,
-		"contexts":    b.Contexts,
-		"isConnected": b.IsConnected,
-		"on": func(event string) *goja.Promise {
-			return k6ext.Promise(vu.Context(), func() (result any, reason error) {
-				return b.On(event) //nolint:wrapcheck
-			})
+		"args": func() *goja.Object {
+			var (
+				margs []mapping
+				args  = cm.Args
+			)
+			for _, arg := range args {
+				a := mapJSHandle(vu, arg)
+				margs = append(margs, a)
+			}
+
+			return rt.ToValue(margs).ToObject(rt)
 		},
-		"userAgent": b.UserAgent,
-		"version":   b.Version,
+		// page(), text() and type() are defined as
+		// functions in order to match Playwright's API
+		"page": func() *goja.Object {
+			mp := mapPage(vu, cm.Page)
+			return rt.ToValue(mp).ToObject(rt)
+		},
+		"text": func() *goja.Object {
+			return rt.ToValue(cm.Text).ToObject(rt)
+		},
+		"type": func() *goja.Object {
+			return rt.ToValue(cm.Type).ToObject(rt)
+		},
+	}
+}
+
+// mapBrowser to the JS module.
+func mapBrowser(vu moduleVU) mapping {
+	rt := vu.Runtime()
+	return mapping{
+		"context": func() (api.BrowserContext, error) {
+			b, err := vu.browser()
+			if err != nil {
+				return nil, err
+			}
+			return b.Context(), nil
+		},
+		"isConnected": func() (bool, error) {
+			b, err := vu.browser()
+			if err != nil {
+				return false, err
+			}
+			return b.IsConnected(), nil
+		},
 		"newContext": func(opts goja.Value) (*goja.Object, error) {
+			b, err := vu.browser()
+			if err != nil {
+				return nil, err
+			}
 			bctx, err := b.NewContext(opts)
 			if err != nil {
 				return nil, err //nolint:wrapcheck
@@ -699,42 +735,30 @@ func mapBrowser(vu moduleVU, b api.Browser) mapping {
 			m := mapBrowserContext(vu, bctx)
 			return rt.ToValue(m).ToObject(rt), nil
 		},
+		"userAgent": func() (string, error) {
+			b, err := vu.browser()
+			if err != nil {
+				return "", err
+			}
+			return b.UserAgent(), nil
+		},
+		"version": func() (string, error) {
+			b, err := vu.browser()
+			if err != nil {
+				return "", err
+			}
+			return b.Version(), nil
+		},
 		"newPage": func(opts goja.Value) (mapping, error) {
+			b, err := vu.browser()
+			if err != nil {
+				return nil, err
+			}
 			page, err := b.NewPage(opts)
 			if err != nil {
 				return nil, err //nolint:wrapcheck
 			}
 			return mapPage(vu, page), nil
-		},
-	}
-}
-
-// mapBrowserType to the JS module.
-func mapBrowserType(vu moduleVU, bt api.BrowserType, wsURL string, isRemoteBrowser bool) mapping {
-	rt := vu.Runtime()
-	return mapping{
-		"connect": func(wsEndpoint string, opts goja.Value) *goja.Object {
-			b := bt.Connect(wsEndpoint, opts)
-			m := mapBrowser(vu, b)
-			return rt.ToValue(m).ToObject(rt)
-		},
-		"executablePath":          bt.ExecutablePath,
-		"launchPersistentContext": bt.LaunchPersistentContext,
-		"name":                    bt.Name,
-		"launch": func(opts goja.Value) *goja.Object {
-			// If browser is remote, transition from launch
-			// to connect and avoid storing the browser pid
-			// as we have no access to it.
-			if isRemoteBrowser {
-				m := mapBrowser(vu, bt.Connect(wsURL, opts))
-				return rt.ToValue(m).ToObject(rt)
-			}
-
-			b, pid := bt.Launch(opts)
-			// store the pid so we can kill it later on panic.
-			vu.registerPid(pid)
-			m := mapBrowser(vu, b)
-			return rt.ToValue(m).ToObject(rt)
 		},
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -23,7 +24,10 @@ import (
 	"github.com/tidwall/gjson"
 	"go.k6.io/k6/cloudapi"
 	"go.k6.io/k6/cmd"
+	"go.k6.io/k6/cmd/tests/events"
 	"go.k6.io/k6/errext/exitcodes"
+	"go.k6.io/k6/event"
+	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/lib/consts"
 	"go.k6.io/k6/lib/fsext"
 	"go.k6.io/k6/lib/testutils"
@@ -42,7 +46,6 @@ func TestVersion(t *testing.T) {
 	assert.Contains(t, stdout, runtime.Version())
 	assert.Contains(t, stdout, runtime.GOOS)
 	assert.Contains(t, stdout, runtime.GOARCH)
-	assert.NotContains(t, stdout[:len(stdout)-1], "\n")
 
 	assert.Empty(t, ts.Stderr.Bytes())
 	assert.Empty(t, ts.LoggerHook.Drain())
@@ -1534,7 +1537,7 @@ func TestMinIterationDuration(t *testing.T) {
 	elapsed := time.Since(start)
 	assert.Greater(t, elapsed, 7*time.Second, "expected more time to have passed because of minIterationDuration")
 	assert.Less(
-		t, elapsed, 14*time.Second,
+		t, elapsed, 15*time.Second,
 		"expected less time to have passed because minIterationDuration should not affect setup() and teardown() ",
 	)
 
@@ -1572,7 +1575,7 @@ func TestMetricNameWarning(t *testing.T) {
 	t.Log(stdout)
 
 	logEntries := ts.LoggerHook.Drain()
-	expectedMsg := `Metric name should only include ASCII letters, numbers and underscores. This name will stop working in `
+	expectedMsg := `Metric name should only include up to 128 ASCII letters, numbers and/or underscores.`
 	filteredEntries := testutils.FilterEntries(logEntries, logrus.WarnLevel, expectedMsg)
 	require.Len(t, filteredEntries, 2)
 	// we do it this way as ordering is not guaranteed
@@ -1824,80 +1827,6 @@ func BenchmarkReadResponseBody(b *testing.B) {
 	cmd.ExecuteWithGlobalState(ts.GlobalState)
 }
 
-func TestBrowserPermissions(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name             string
-		envVarValue      string
-		envVarMsgValue   string
-		expectedExitCode exitcodes.ExitCode
-		expectedError    string
-	}{
-		{
-			name:             "no env var set",
-			envVarValue:      "",
-			expectedExitCode: 107,
-			expectedError:    "To run browser tests set env var K6_BROWSER_ENABLED=true",
-		},
-		{
-			name:             "env var set but set to false",
-			envVarValue:      "false",
-			expectedExitCode: 107,
-			expectedError:    "To run browser tests set env var K6_BROWSER_ENABLED=true",
-		},
-		{
-			name:             "env var set but set to 09adsu",
-			envVarValue:      "09adsu",
-			expectedExitCode: 107,
-			expectedError:    "To run browser tests set env var K6_BROWSER_ENABLED=true",
-		},
-		{
-			name:             "with custom message",
-			envVarValue:      "09adsu",
-			envVarMsgValue:   "Try again later",
-			expectedExitCode: 107,
-			expectedError:    "Try again later",
-		},
-		{
-			name:             "env var set and set to true",
-			envVarValue:      "true",
-			expectedExitCode: 0,
-			expectedError:    "",
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			script := `
-			import { chromium } from 'k6/experimental/browser';
-
-			export default function() {};
-			`
-
-			ts := getSingleFileTestState(t, script, []string{}, tt.expectedExitCode)
-			if tt.envVarValue != "" {
-				ts.Env["K6_BROWSER_ENABLED"] = tt.envVarValue
-			}
-			if tt.envVarMsgValue != "" {
-				ts.Env["K6_BROWSER_ENABLED_MSG"] = tt.envVarMsgValue
-			}
-			cmd.ExecuteWithGlobalState(ts.GlobalState)
-
-			loglines := ts.LoggerHook.Drain()
-
-			if tt.expectedError == "" {
-				require.Len(t, loglines, 0)
-				return
-			}
-
-			assert.Contains(t, loglines[0].Message, tt.expectedError)
-		})
-	}
-}
-
 func TestUIRenderOutput(t *testing.T) {
 	t.Parallel()
 
@@ -1995,6 +1924,306 @@ func TestBadLogOutput(t *testing.T) {
 			ts.Stdin = bytes.NewBufferString(`export default function () {};`)
 			ts.ExpectedExitCode = -1
 			cmd.ExecuteWithGlobalState(ts.GlobalState)
+		})
+	}
+}
+
+// HACK: We need this so multiple tests can register differently named modules.
+var uniqueModuleNumber uint64 //nolint:gochecknoglobals
+
+// Tests that the appropriate events are emitted in the correct order.
+func TestEventSystemOK(t *testing.T) {
+	t.Parallel()
+
+	ts := NewGlobalTestState(t)
+
+	moduleName := fmt.Sprintf("k6/x/testevents-%d", atomic.AddUint64(&uniqueModuleNumber, 1))
+	mod := events.New(event.GlobalEvents, event.VUEvents)
+	modules.Register(moduleName, mod)
+
+	ts.CmdArgs = []string{"k6", "--quiet", "run", "-"}
+	ts.Stdin = bytes.NewBuffer([]byte(fmt.Sprintf(`
+		import events from '%s';
+		import { sleep } from 'k6';
+
+		export let options = {
+			vus: 1,
+			iterations: 5,
+		}
+
+		export default function () { sleep(1); }
+	`, moduleName)))
+
+	cmd.ExecuteWithGlobalState(ts.GlobalState)
+
+	doneCh := make(chan struct{})
+	go func() {
+		mod.WG.Wait()
+		close(doneCh)
+	}()
+
+	select {
+	case <-doneCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out")
+	}
+
+	expLog := []string{
+		`got event Init with data '<nil>'`,
+		`got event TestStart with data '<nil>'`,
+		`got event IterStart with data '{Iteration:0 VUID:1 ScenarioName:default Error:<nil>}'`,
+		`got event IterEnd with data '{Iteration:0 VUID:1 ScenarioName:default Error:<nil>}'`,
+		`got event IterStart with data '{Iteration:1 VUID:1 ScenarioName:default Error:<nil>}'`,
+		`got event IterEnd with data '{Iteration:1 VUID:1 ScenarioName:default Error:<nil>}'`,
+		`got event IterStart with data '{Iteration:2 VUID:1 ScenarioName:default Error:<nil>}'`,
+		`got event IterEnd with data '{Iteration:2 VUID:1 ScenarioName:default Error:<nil>}'`,
+		`got event IterStart with data '{Iteration:3 VUID:1 ScenarioName:default Error:<nil>}'`,
+		`got event IterEnd with data '{Iteration:3 VUID:1 ScenarioName:default Error:<nil>}'`,
+		`got event IterStart with data '{Iteration:4 VUID:1 ScenarioName:default Error:<nil>}'`,
+		`got event IterEnd with data '{Iteration:4 VUID:1 ScenarioName:default Error:<nil>}'`,
+		`got event TestEnd with data '<nil>'`,
+		`got event Exit with data '&{Error:<nil>}'`,
+	}
+	log := ts.LoggerHook.Lines()
+	assert.Equal(t, expLog, log)
+}
+
+// Check emitted events in the case of a script error.
+func TestEventSystemError(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name, script string
+		expLog       []string
+		expExitCode  exitcodes.ExitCode
+	}{
+		{
+			name: "abort",
+			script: `
+				import { test } from 'k6/execution';
+
+				export let options = {
+					vus: 1,
+					iterations: 5,
+				}
+
+				export default function () {
+					test.abort('oops!');
+				}
+		`, expLog: []string{
+				"got event Init with data '<nil>'",
+				"got event TestStart with data '<nil>'",
+				"got event IterStart with data '{Iteration:0 VUID:1 ScenarioName:default Error:<nil>}'",
+				"got event IterEnd with data '{Iteration:0 VUID:1 ScenarioName:default Error:test aborted: oops! at file:///-:11:16(6)}'",
+				"got event TestEnd with data '<nil>'",
+				"got event Exit with data '&{Error:test aborted: oops! at file:///-:11:16(6)}'",
+				"test aborted: oops! at file:///-:11:16(6)",
+			},
+			expExitCode: exitcodes.ScriptAborted,
+		},
+		{
+			name:   "init",
+			script: "undefinedVar",
+			expLog: []string{
+				"got event Exit with data '&{Error:could not initialize '-': could not load JS test " +
+					"'file:///-': ReferenceError: undefinedVar is not defined\n\tat file:///-:2:0(12)\n}'",
+				"ReferenceError: undefinedVar is not defined\n\tat file:///-:2:0(12)\n",
+			},
+			expExitCode: exitcodes.ScriptException,
+		},
+		{
+			name: "throw",
+			script: `
+				export let options = {
+					vus: 1,
+					iterations: 2,
+				}
+
+				export default function () {
+					throw new Error('oops!');
+				}
+		`, expLog: []string{
+				"got event Init with data '<nil>'",
+				"got event TestStart with data '<nil>'",
+				"got event IterStart with data '{Iteration:0 VUID:1 ScenarioName:default Error:<nil>}'",
+				"got event IterEnd with data '{Iteration:0 VUID:1 ScenarioName:default Error:Error: oops!\n\tat file:///-:9:11(3)\n}'",
+				"Error: oops!\n\tat file:///-:9:11(3)\n",
+				"got event IterStart with data '{Iteration:1 VUID:1 ScenarioName:default Error:<nil>}'",
+				"got event IterEnd with data '{Iteration:1 VUID:1 ScenarioName:default Error:Error: oops!\n\tat file:///-:9:11(3)\n}'",
+				"Error: oops!\n\tat file:///-:9:11(3)\n",
+				"got event TestEnd with data '<nil>'",
+				"got event Exit with data '&{Error:<nil>}'",
+			},
+			expExitCode: 0,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := NewGlobalTestState(t)
+
+			moduleName := fmt.Sprintf("k6/x/testevents-%d", atomic.AddUint64(&uniqueModuleNumber, 1))
+			mod := events.New(event.GlobalEvents, event.VUEvents)
+			modules.Register(moduleName, mod)
+
+			ts.CmdArgs = []string{"k6", "--quiet", "run", "-"}
+			ts.ExpectedExitCode = int(tc.expExitCode)
+			ts.Stdin = bytes.NewBuffer([]byte(fmt.Sprintf("import events from '%s';\n%s", moduleName, tc.script)))
+
+			cmd.ExecuteWithGlobalState(ts.GlobalState)
+
+			doneCh := make(chan struct{})
+			go func() {
+				mod.WG.Wait()
+				close(doneCh)
+			}()
+
+			select {
+			case <-doneCh:
+			case <-time.After(time.Second):
+				t.Fatal("timed out")
+			}
+
+			log := ts.LoggerHook.Lines()
+			assert.Equal(t, tc.expLog, log)
+		})
+	}
+}
+
+func BenchmarkRun(b *testing.B) {
+	b.StopTimer()
+
+	for i := 0; i < b.N; i++ {
+		ts := NewGlobalTestState(b)
+
+		ts.CmdArgs = []string{"k6", "--quiet", "run", "-"}
+		ts.Stdin = bytes.NewBuffer([]byte(`
+		export let options = {
+			vus: 10,
+			iterations: 100,
+		}
+
+		export default function () {}
+		`))
+		ts.ExpectedExitCode = 0
+
+		b.StartTimer()
+		cmd.ExecuteWithGlobalState(ts.GlobalState)
+		b.StopTimer()
+	}
+}
+
+func BenchmarkRunEvents(b *testing.B) {
+	b.StopTimer()
+
+	for i := 0; i < b.N; i++ {
+		ts := NewGlobalTestState(b)
+
+		moduleName := fmt.Sprintf("k6/x/testevents-%d", atomic.AddUint64(&uniqueModuleNumber, 1))
+		mod := events.New(event.GlobalEvents, event.VUEvents)
+		modules.Register(moduleName, mod)
+
+		ts.CmdArgs = []string{"k6", "--quiet", "run", "-"}
+		ts.Stdin = bytes.NewBuffer([]byte(fmt.Sprintf(`
+		import events from '%s';
+		export let options = {
+			vus: 10,
+			iterations: 100,
+		}
+
+		export default function () {}
+		`, moduleName)))
+		ts.ExpectedExitCode = 0
+
+		b.StartTimer()
+		cmd.ExecuteWithGlobalState(ts.GlobalState)
+		b.StopTimer()
+
+		doneCh := make(chan struct{})
+		go func() {
+			mod.WG.Wait()
+			close(doneCh)
+		}()
+
+		select {
+		case <-doneCh:
+		case <-time.After(time.Second):
+			b.Fatal("timed out")
+		}
+	}
+}
+
+func TestBrowserPermissions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		options          string
+		expectedExitCode exitcodes.ExitCode
+		expectedError    string
+	}{
+		// When we do not supply the correct browser options,
+		// we expect that the test iteration will stop and not
+		// attempt to start a chrome instance.
+		{
+			name:             "browser option not set",
+			options:          "",
+			expectedExitCode: 0,
+			expectedError:    "GoError: browser not found in registry. make sure to set browser type option in scenario definition in order to use the browser module",
+		},
+		// When we do supply the correct browser options,
+		// we expect that the browser module will start
+		// the a chrome instance and work with the browser
+		// APIs defined in the test script.
+		//
+		// We do not actually want to rely on having chrome
+		// installed on dev/ci machines, and all we need to
+		// verify is that the browser module does try to exec
+		// a command when the correct browser options are supplied.
+		// This test will try to run a "fake" command and we
+		// expect that the test will fail when attempting to
+		// run that command.
+		{
+			name: "browser option set",
+			options: `export const options = {
+				scenarios: {
+						browser: {
+						executor: 'shared-iterations',
+						options: {
+							browser: {
+								type: 'chromium',
+							},
+						},
+					},
+				},
+			}`,
+			expectedExitCode: 108,
+			expectedError:    "error building browser on IterStart: launching browser: exec: \"k6-browser-fake-cmd\": executable file not found",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			script := fmt.Sprintf(`
+			import { browser } from 'k6/experimental/browser';
+
+			%s
+
+			export default function() {
+			  browser.isConnected();
+			};
+			`, tt.options)
+
+			ts := getSingleFileTestState(t, script, []string{}, tt.expectedExitCode)
+			ts.Env["K6_BROWSER_EXECUTABLE_PATH"] = "k6-browser-fake-cmd"
+			cmd.ExecuteWithGlobalState(ts.GlobalState)
+			loglines := ts.LoggerHook.Drain()
+
+			assert.Contains(t, loglines[0].Message, tt.expectedError)
 		})
 	}
 }

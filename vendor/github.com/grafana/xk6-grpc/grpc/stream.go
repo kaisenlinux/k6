@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"sync"
 	"time"
 
@@ -28,7 +29,6 @@ type message struct {
 
 const (
 	opened = iota + 1
-	closing
 	closed
 )
 
@@ -51,8 +51,8 @@ type stream struct {
 
 	obj *goja.Object // the object that is given to js to interact with the stream
 
-	state int8
-	done  chan struct{}
+	writingState int8
+	done         chan struct{}
 
 	writeQueueCh chan message
 
@@ -141,7 +141,7 @@ func (s *stream) loop() {
 	}
 }
 
-func (s *stream) queueMessage(msg map[string]interface{}) {
+func (s *stream) queueMessage(msg interface{}) {
 	metrics.PushIfNotDone(s.vu.Context(), s.vu.State().Samples, metrics.Sample{
 		TimeSeries: metrics.TimeSeries{
 			Metric: s.instanceMetrics.StreamsMessagesReceived,
@@ -185,17 +185,19 @@ func (s *stream) readData(wg *sync.WaitGroup) {
 			return
 		}
 
-		if len(msg) == 0 && isRegularClosing(err) {
+		if isRegularClosing(err) {
 			s.logger.WithError(err).Debug("stream is cancelled/finished")
 
 			s.tq.Queue(func() error {
-				return s.closeWithError(nil)
+				return s.closeWithError(err)
 			})
 
 			return
 		}
 
-		s.queueMessage(msg)
+		if msg != nil || !reflect.ValueOf(msg).IsNil() {
+			s.queueMessage(msg)
+		}
 	}
 }
 
@@ -234,12 +236,7 @@ func (s *stream) writeData(wg *sync.WaitGroup) {
 
 				err := s.stream.Send(msg.msg)
 				if err != nil {
-					s.logger.WithError(err).Error("failed to send data to the stream")
-
-					s.tq.Queue(func() error {
-						return s.closeWithError(err)
-					})
-
+					s.processSendError(err)
 					return
 				}
 
@@ -284,6 +281,17 @@ func (s *stream) writeData(wg *sync.WaitGroup) {
 	}
 }
 
+func (s *stream) processSendError(err error) {
+	if errors.Is(err, io.EOF) {
+		s.logger.WithError(err).Debug("skip sending a message stream is cancelled/finished")
+		err = nil
+	}
+
+	s.tq.Queue(func() error {
+		return s.closeWithError(err)
+	})
+}
+
 // on registers a listener for a certain event type
 func (s *stream) on(event string, listener func(goja.Value) (goja.Value, error)) {
 	if err := s.eventListeners.add(event, listener); err != nil {
@@ -293,7 +301,7 @@ func (s *stream) on(event string, listener func(goja.Value) (goja.Value, error))
 
 // write writes a message to the stream
 func (s *stream) write(input goja.Value) {
-	if s.state != opened {
+	if s.writingState != opened {
 		return
 	}
 
@@ -314,21 +322,39 @@ func (s *stream) write(input goja.Value) {
 
 // end closes client the stream
 func (s *stream) end() {
-	if s.state == closed || s.state == closing {
+	if s.writingState == closed {
 		return
 	}
 
-	s.state = closing
+	s.logger.Debugf("finishing stream %s writing", s.method)
+
+	s.writingState = closed
 	s.writeQueueCh <- message{isClosing: true}
 }
 
 func (s *stream) closeWithError(err error) error {
-	if s.state == closed {
-		return nil
+	s.close(err)
+
+	return s.callErrorListeners(err)
+}
+
+// close closes the stream and call end event listeners
+// Note: in the regular closing the io.EOF could come
+func (s *stream) close(err error) {
+	if err == nil {
+		return
 	}
 
-	s.state = closed
+	select {
+	case <-s.done:
+		s.logger.Debugf("stream %v is already closed", s.method)
+		return
+	default:
+	}
+
+	s.logger.Debugf("stream %s is closing", s.method)
 	close(s.done)
+
 	s.tq.Queue(func() error {
 		return s.callEventListeners(eventEnd)
 	})
@@ -336,24 +362,24 @@ func (s *stream) closeWithError(err error) error {
 	if s.timeoutCancel != nil {
 		s.timeoutCancel()
 	}
-
-	s.logger.WithError(err).Debug("connection closed")
-
-	if err != nil {
-		if errList := s.callErrorListeners(err); errList != nil {
-			return errList
-		}
-	}
-
-	return nil
 }
 
 func (s *stream) callErrorListeners(e error) error {
+	if e == nil || errors.Is(e, io.EOF) {
+		return nil
+	}
+
 	rt := s.vu.Runtime()
 
 	obj := extractError(e)
 
-	for _, errorListener := range s.eventListeners.all(eventError) {
+	list := s.eventListeners.all(eventError)
+
+	if len(list) == 0 {
+		s.logger.Warnf("no handlers for error registered, but an error happened: %s", e)
+	}
+
+	for _, errorListener := range list {
 		if _, err := errorListener(rt.ToValue(obj)); err != nil {
 			return err
 		}
