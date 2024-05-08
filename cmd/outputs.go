@@ -16,35 +16,53 @@ import (
 	"go.k6.io/k6/output/json"
 	"go.k6.io/k6/output/statsd"
 
+	"github.com/grafana/xk6-dashboard/dashboard"
 	"github.com/grafana/xk6-output-prometheus-remote/pkg/remotewrite"
+)
+
+// builtinOutput marks the available builtin outputs.
+//
+//go:generate enumer -type=builtinOutput -trimprefix builtinOutput -transform=kebab -output builtin_output_gen.go
+type builtinOutput uint32
+
+const (
+	builtinOutputCloud builtinOutput = iota
+	builtinOutputCSV
+	builtinOutputDatadog
+	builtinOutputExperimentalPrometheusRW
+	builtinOutputInfluxdb
+	builtinOutputJSON
+	builtinOutputKafka
+	builtinOutputStatsd
 )
 
 // TODO: move this to an output sub-module after we get rid of the old collectors?
 func getAllOutputConstructors() (map[string]output.Constructor, error) {
 	// Start with the built-in outputs
 	result := map[string]output.Constructor{
-		"json":     json.New,
-		"cloud":    cloud.New,
-		"influxdb": influxdb.New,
-		"kafka": func(params output.Params) (output.Output, error) {
+		builtinOutputJSON.String():     json.New,
+		builtinOutputCloud.String():    cloud.New,
+		builtinOutputCSV.String():      csv.New,
+		builtinOutputInfluxdb.String(): influxdb.New,
+		builtinOutputKafka.String(): func(params output.Params) (output.Output, error) {
 			return nil, errors.New("the kafka output was deprecated in k6 v0.32.0 and removed in k6 v0.34.0, " +
 				"please use the new xk6 kafka output extension instead - https://github.com/k6io/xk6-output-kafka")
 		},
-		"statsd": func(params output.Params) (output.Output, error) {
+		builtinOutputStatsd.String(): func(params output.Params) (output.Output, error) {
 			params.Logger.Warn("The statsd output is deprecated, and will be removed in a future k6 version. " +
 				"Please use the new xk6 statsd output extension instead. " +
 				"It can be found at https://github.com/LeonAdato/xk6-output-statsd and " +
 				"more info at https://github.com/grafana/k6/issues/2982.")
 			return statsd.New(params)
 		},
-		"datadog": func(params output.Params) (output.Output, error) {
+		builtinOutputDatadog.String(): func(params output.Params) (output.Output, error) {
 			return nil, errors.New("the datadog output was deprecated in k6 v0.32.0 and removed in k6 v0.34.0, " +
 				"please use the statsd output with env. variable K6_STATSD_ENABLE_TAGS=true instead")
 		},
-		"csv": csv.New,
-		"experimental-prometheus-rw": func(params output.Params) (output.Output, error) {
+		builtinOutputExperimentalPrometheusRW.String(): func(params output.Params) (output.Output, error) {
 			return remotewrite.New(params)
 		},
+		"web-dashboard": dashboard.New,
 	}
 
 	exts := ext.Get(ext.OutputExtension)
@@ -92,9 +110,15 @@ func createOutputs(
 		RuntimeOptions: test.preInitState.RuntimeOptions,
 		ExecutionPlan:  executionPlan,
 	}
-	result := make([]output.Output, 0, len(test.derivedConfig.Out))
 
-	for _, outputFullArg := range test.derivedConfig.Out {
+	outputs := test.derivedConfig.Out
+	if test.derivedConfig.WebDashboard.Bool {
+		outputs = append(outputs, dashboard.OutputName)
+	}
+
+	result := make([]output.Output, 0, len(outputs))
+
+	for _, outputFullArg := range outputs {
 		outputType, outputArg := parseOutputArgument(outputFullArg)
 		outputConstructor, ok := outputConstructors[outputType]
 		if !ok {

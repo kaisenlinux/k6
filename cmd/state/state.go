@@ -52,7 +52,7 @@ type GlobalState struct {
 	SignalNotify func(chan<- os.Signal, ...os.Signal)
 	SignalStop   func(chan<- os.Signal)
 
-	Logger         *logrus.Logger
+	Logger         *logrus.Logger //nolint:forbidigo //TODO:change to FieldLogger
 	FallbackLogger logrus.FieldLogger
 }
 
@@ -69,16 +69,16 @@ func NewGlobalState(ctx context.Context) *GlobalState {
 	stderrTTY := !isDumbTerm && (isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd()))
 	outMutex := &sync.Mutex{}
 	stdout := &console.Writer{
-		RawOut: os.Stdout,
-		Mutex:  outMutex,
-		Writer: colorable.NewColorable(os.Stdout),
-		IsTTY:  stdoutTTY,
+		RawOutFd: int(os.Stdout.Fd()),
+		Mutex:    outMutex,
+		Writer:   colorable.NewColorable(os.Stdout),
+		IsTTY:    stdoutTTY,
 	}
 	stderr := &console.Writer{
-		RawOut: os.Stderr,
-		Mutex:  outMutex,
-		Writer: colorable.NewColorable(os.Stderr),
-		IsTTY:  stderrTTY,
+		RawOutFd: int(os.Stderr.Fd()),
+		Mutex:    outMutex,
+		Writer:   colorable.NewColorable(os.Stderr),
+		IsTTY:    stderrTTY,
 	}
 
 	env := BuildEnvMap(os.Environ())
@@ -134,21 +134,23 @@ func NewGlobalState(ctx context.Context) *GlobalState {
 
 // GlobalFlags contains global config values that apply for all k6 sub-commands.
 type GlobalFlags struct {
-	ConfigFilePath string
-	Quiet          bool
-	NoColor        bool
-	Address        string
-	LogOutput      string
-	LogFormat      string
-	Verbose        bool
+	ConfigFilePath   string
+	Quiet            bool
+	NoColor          bool
+	Address          string
+	ProfilingEnabled bool
+	LogOutput        string
+	LogFormat        string
+	Verbose          bool
 }
 
 // GetDefaultFlags returns the default global flags.
 func GetDefaultFlags(homeDir string) GlobalFlags {
 	return GlobalFlags{
-		Address:        "localhost:6565",
-		ConfigFilePath: filepath.Join(homeDir, "loadimpact", "k6", defaultConfigFileName),
-		LogOutput:      "stderr",
+		Address:          "localhost:6565",
+		ProfilingEnabled: false,
+		ConfigFilePath:   filepath.Join(homeDir, "loadimpact", "k6", defaultConfigFileName),
+		LogOutput:        "stderr",
 	}
 }
 

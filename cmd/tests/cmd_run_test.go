@@ -37,15 +37,25 @@ import (
 func TestVersion(t *testing.T) {
 	t.Parallel()
 
-	ts := NewGlobalTestState(t)
-	ts.CmdArgs = []string{"k6", "version"}
-	cmd.ExecuteWithGlobalState(ts.GlobalState)
+	tests := map[string]struct {
+		args string
+	}{
+		"flag":       {"--version"},
+		"subcommand": {"version"},
+	}
 
-	stdout := ts.Stdout.String()
-	assert.Contains(t, stdout, "k6 v"+consts.Version)
-	assert.Contains(t, stdout, runtime.Version())
-	assert.Contains(t, stdout, runtime.GOOS)
-	assert.Contains(t, stdout, runtime.GOARCH)
+	ts := NewGlobalTestState(t)
+
+	for _, tc := range tests {
+		ts.CmdArgs = []string{"k6", tc.args}
+		cmd.ExecuteWithGlobalState(ts.GlobalState)
+
+		stdout := ts.Stdout.String()
+		assert.Contains(t, stdout, "k6 v"+consts.Version)
+		assert.Contains(t, stdout, runtime.Version())
+		assert.Contains(t, stdout, runtime.GOOS)
+		assert.Contains(t, stdout, runtime.GOARCH)
+	}
 
 	assert.Empty(t, ts.Stderr.Bytes())
 	assert.Empty(t, ts.LoggerHook.Drain())
@@ -98,10 +108,6 @@ func TestBinaryNameHelpStdout(t *testing.T) {
 		{
 			cmdName:        "cloud",
 			containsOutput: fmt.Sprintf("%s cloud script.js", ts.BinaryName),
-		},
-		{
-			cmdName:        "convert",
-			containsOutput: fmt.Sprintf("%s convert -O har-session.js session.har", ts.BinaryName),
 		},
 		{
 			cmdName:        "login",
@@ -623,7 +629,7 @@ func TestSetupTeardownThresholds(t *testing.T) {
 	assert.True(t, testutils.LogContains(logMsgs, logrus.DebugLevel, "Running thresholds on 4 metrics..."))
 	assert.True(t, testutils.LogContains(logMsgs, logrus.DebugLevel, "Finalizing thresholds..."))
 	assert.True(t, testutils.LogContains(logMsgs, logrus.DebugLevel, "Metrics emission of VUs and VUsMax metrics stopped"))
-	assert.True(t, testutils.LogContains(logMsgs, logrus.DebugLevel, "Metrics processing finished!"))
+	assert.True(t, testutils.LogContains(logMsgs, logrus.DebugLevel, "Metrics and traces processing finished!"))
 }
 
 func TestThresholdsFailed(t *testing.T) {
@@ -707,7 +713,7 @@ func TestAbortedByThreshold(t *testing.T) {
 	assert.Contains(t, stdOut, `✗ iterations`)
 	assert.Contains(t, stdOut, `teardown() called`)
 	assert.Contains(t, stdOut, `level=debug msg="Metrics emission of VUs and VUsMax metrics stopped"`)
-	assert.Contains(t, stdOut, `level=debug msg="Metrics processing finished!"`)
+	assert.Contains(t, stdOut, `level=debug msg="Metrics and traces processing finished!"`)
 	assert.Contains(t, stdOut, `level=debug msg="Sending test finished" output=cloud ref=111 run_status=8 tainted=true`)
 }
 
@@ -760,7 +766,7 @@ func TestAbortedByUserWithGoodThresholds(t *testing.T) {
 	assert.Contains(t, stdout, `✓ { group:::teardown }`)
 	assert.Contains(t, stdout, `Stopping k6 in response to signal`)
 	assert.Contains(t, stdout, `level=debug msg="Metrics emission of VUs and VUsMax metrics stopped"`)
-	assert.Contains(t, stdout, `level=debug msg="Metrics processing finished!"`)
+	assert.Contains(t, stdout, `level=debug msg="Metrics and traces processing finished!"`)
 	assert.Contains(t, stdout, `level=debug msg="Sending test finished" output=cloud ref=111 run_status=5 tainted=false`)
 }
 
@@ -890,7 +896,7 @@ func TestAbortedByUserWithRestAPI(t *testing.T) {
 	assert.Contains(t, stdout, `PATCH /v1/status`)
 	assert.Contains(t, stdout, `level=error msg="test run stopped from REST API`)
 	assert.Contains(t, stdout, `level=debug msg="Metrics emission of VUs and VUsMax metrics stopped"`)
-	assert.Contains(t, stdout, `level=debug msg="Metrics processing finished!"`)
+	assert.Contains(t, stdout, `level=debug msg="Metrics and traces processing finished!"`)
 	assert.Contains(t, stdout, `level=debug msg="Sending test finished" output=cloud ref=111 run_status=5 tainted=false`)
 	assert.NotContains(t, stdout, `Running thresholds`)
 	assert.NotContains(t, stdout, `Finalizing thresholds`)
@@ -944,7 +950,7 @@ func TestAbortedByScriptSetupErrorWithDependency(t *testing.T) {
 	assert.Contains(t, stdout, "bogus summary")
 }
 
-func runTestWithNoLinger(t *testing.T, ts *GlobalTestState) {
+func runTestWithNoLinger(_ *testing.T, ts *GlobalTestState) {
 	cmd.ExecuteWithGlobalState(ts.GlobalState)
 }
 
@@ -1040,7 +1046,7 @@ func testAbortedByScriptError(t *testing.T, script string, runTest func(*testing
 	stdout := ts.Stdout.String()
 	t.Log(stdout)
 	assert.Contains(t, stdout, `level=debug msg="Metrics emission of VUs and VUsMax metrics stopped"`)
-	assert.Contains(t, stdout, `level=debug msg="Metrics processing finished!"`)
+	assert.Contains(t, stdout, `level=debug msg="Metrics and traces processing finished!"`)
 	assert.Contains(t, stdout, `level=debug msg="Everything has finished, exiting k6 with an error!"`)
 	assert.Contains(t, stdout, `level=debug msg="Sending test finished" output=cloud ref=111 run_status=7 tainted=false`)
 	return ts
@@ -1185,7 +1191,7 @@ func testAbortedByScriptTestAbort(t *testing.T, script string, runTest func(*tes
 	assert.Contains(t, stdout, "test aborted: foo")
 	assert.Contains(t, stdout, `level=debug msg="Sending test finished" output=cloud ref=111 run_status=5 tainted=false`)
 	assert.Contains(t, stdout, `level=debug msg="Metrics emission of VUs and VUsMax metrics stopped"`)
-	assert.Contains(t, stdout, `level=debug msg="Metrics processing finished!"`)
+	assert.Contains(t, stdout, `level=debug msg="Metrics and traces processing finished!"`)
 	assert.Contains(t, stdout, "bogus summary")
 }
 
@@ -1546,7 +1552,7 @@ func TestMinIterationDuration(t *testing.T) {
 	assert.Contains(t, stdout, "✓ test_counter.........: 3")
 }
 
-func TestMetricNameWarning(t *testing.T) {
+func TestMetricNameError(t *testing.T) {
 	t.Parallel()
 	script := `
 		import { Counter } from 'k6/metrics';
@@ -1560,14 +1566,14 @@ func TestMetricNameWarning(t *testing.T) {
 		};
 
 		var c = new Counter('test counter');
-		new Counter('test_counter_#');
+		new Counter('test_counter_#'); // this is also bad but we error on the one above
 
 		export function setup() { c.add(1); };
 		export default function () { c.add(1); };
 		export function teardown() { c.add(1); };
 	`
 
-	ts := getSimpleCloudOutputTestState(t, script, nil, cloudapi.RunStatusFinished, cloudapi.ResultStatusPassed, 0)
+	ts := getSingleFileTestState(t, script, nil, exitcodes.ScriptException)
 
 	cmd.ExecuteWithGlobalState(ts.GlobalState)
 
@@ -1575,13 +1581,10 @@ func TestMetricNameWarning(t *testing.T) {
 	t.Log(stdout)
 
 	logEntries := ts.LoggerHook.Drain()
-	expectedMsg := `Metric name should only include up to 128 ASCII letters, numbers and/or underscores.`
-	filteredEntries := testutils.FilterEntries(logEntries, logrus.WarnLevel, expectedMsg)
-	require.Len(t, filteredEntries, 2)
-	// we do it this way as ordering is not guaranteed
-	names := []interface{}{filteredEntries[0].Data["name"], filteredEntries[1].Data["name"]}
-	require.Contains(t, names, "test counter")
-	require.Contains(t, names, "test_counter_#")
+	expectedMsg := `Metric names must only include up to 128 ASCII letters, numbers, or underscores`
+	filteredEntries := testutils.FilterEntries(logEntries, logrus.ErrorLevel, expectedMsg)
+	require.Len(t, filteredEntries, 1)
+	require.Contains(t, filteredEntries[0].Message, "'test counter'")
 }
 
 func TestRunTags(t *testing.T) {
@@ -1717,7 +1720,7 @@ func TestRunWithCloudOutputOverrides(t *testing.T) {
 	assert.Contains(t, stdout, "iterations...........: 1")
 }
 
-func TestRunWithCloudOutputCustomConfigAndOverrides(t *testing.T) {
+func TestRunWithCloudOutputCustomConfigAndOverridesLegacyCloudOption(t *testing.T) {
 	t.Parallel()
 
 	script := `
@@ -1727,6 +1730,56 @@ export const options = {
       name: 'Hello k6 Cloud!',
       projectID: 123456,
     },
+  },
+};
+
+export default function() {};`
+
+	ts := getSingleFileTestState(t, script, []string{"-v", "--log-output=stdout", "--out=cloud"}, 0)
+
+	configOverride := http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		b, err := io.ReadAll(req.Body)
+		require.NoError(t, err)
+
+		bjs := string(b)
+		assert.Contains(t, bjs, `"name":"Hello k6 Cloud!"`)
+		assert.Contains(t, bjs, `"project_id":123456`)
+
+		resp.WriteHeader(http.StatusOK)
+		_, err = fmt.Fprint(resp, `{
+			"reference_id": "1337",
+			"config": {
+				"webAppURL": "https://bogus.url",
+				"testRunDetails": "https://some.other.url/foo/tests/org/1337?bar=baz"
+			},
+			"logs": [
+				{"level": "debug", "message": "test debug message"},
+				{"level": "info", "message": "test message"}
+			]
+		}`)
+		assert.NoError(t, err)
+	})
+	srv := getCloudTestEndChecker(t, 1337, configOverride, cloudapi.RunStatusFinished, cloudapi.ResultStatusPassed)
+	ts.Env["K6_CLOUD_HOST"] = srv.URL
+
+	cmd.ExecuteWithGlobalState(ts.GlobalState)
+
+	stdout := ts.Stdout.String()
+	t.Log(stdout)
+	assert.Contains(t, stdout, "execution: local")
+	assert.Contains(t, stdout, "output: cloud (https://some.other.url/foo/tests/org/1337?bar=baz)")
+	assert.Contains(t, stdout, `level=debug msg="test debug message" output=cloud source=grafana-k6-cloud`)
+	assert.Contains(t, stdout, `level=info msg="test message" output=cloud source=grafana-k6-cloud`)
+}
+
+func TestRunWithCloudOutputCustomConfigAndOverrides(t *testing.T) {
+	t.Parallel()
+
+	script := `
+export const options = {
+  cloud: {
+    name: 'Hello k6 Cloud!',
+    projectID: 123456,
   },
 };
 
@@ -1788,6 +1841,7 @@ func TestPrometheusRemoteWriteOutput(t *testing.T) {
 func BenchmarkReadResponseBody(b *testing.B) {
 	httpSrv := httpmultibin.NewHTTPMultiBin(b)
 
+	//nolint:goconst
 	script := httpSrv.Replacer.Replace(`
 		import http from "k6/http";
 		import { check, sleep } from "k6";
@@ -1857,6 +1911,44 @@ func TestUIRenderOutput(t *testing.T) {
 
 			stdout := ts.Stdout.String()
 			assert.Contains(t, stdout, tc.expRender)
+		})
+	}
+}
+
+func TestUIRenderWebDashboard(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		env       string
+		active    bool
+		expRender string
+	}{
+		{expRender: "web dashboard:"},
+		{env: "false", expRender: "web dashboard:"},
+		{env: "true", active: true, expRender: "web dashboard: http://127.0.0.1:"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+
+		t.Run(tc.expRender, func(t *testing.T) {
+			t.Parallel()
+
+			ts := NewGlobalTestState(t)
+			if tc.env != "" {
+				ts.Env["K6_WEB_DASHBOARD"] = tc.env
+			}
+			ts.Env["K6_WEB_DASHBOARD_PORT"] = "0"
+			ts.CmdArgs = []string{"k6", "run", "--log-output=stdout"}
+			ts.CmdArgs = append(ts.CmdArgs, "-")
+			ts.Stdin = bytes.NewBufferString(`export default function() {};`)
+			cmd.ExecuteWithGlobalState(ts.GlobalState)
+
+			if tc.active {
+				assert.Contains(t, ts.Stdout.String(), tc.expRender)
+			} else {
+				assert.NotContains(t, ts.Stdout.String(), tc.expRender)
+			}
 		})
 	}
 }
@@ -2200,7 +2292,7 @@ func TestBrowserPermissions(t *testing.T) {
 				},
 			}`,
 			expectedExitCode: 108,
-			expectedError:    "error building browser on IterStart: launching browser: exec: \"k6-browser-fake-cmd\": executable file not found",
+			expectedError:    "k6-browser-fake-cmd",
 		},
 	}
 
@@ -2226,4 +2318,36 @@ func TestBrowserPermissions(t *testing.T) {
 			assert.Contains(t, loglines[0].Message, tt.expectedError)
 		})
 	}
+}
+
+func TestSetupTimeout(t *testing.T) {
+	t.Parallel()
+	ts := NewGlobalTestState(t)
+	ts.ExpectedExitCode = int(exitcodes.SetupTimeout)
+	ts.CmdArgs = []string{"k6", "run", "-"}
+	ts.Stdin = bytes.NewBufferString(`
+		import { sleep } from 'k6';
+
+		export const options = {
+			setupTimeout: '1s',
+		};
+
+		export function setup() { sleep(100000); };
+		export default function() {}
+	`)
+
+	start := time.Now()
+	cmd.ExecuteWithGlobalState(ts.GlobalState)
+	elapsed := time.Since(start)
+	assert.Greater(t, elapsed, 1*time.Second, "expected more time to have passed because of setupTimeout")
+	assert.Less(
+		t, elapsed, 5*time.Second,
+		"expected less time to have passed because setupTimeout ",
+	)
+
+	stdout := ts.Stdout.String()
+	t.Log(stdout)
+	stderr := ts.Stderr.String()
+	t.Log(stderr)
+	assert.Contains(t, stderr, "setup() execution timed out after 1 seconds")
 }

@@ -3,12 +3,19 @@ package common
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/grafana/xk6-browser/k6ext"
 	"github.com/grafana/xk6-browser/log"
 
 	"github.com/dop251/goja"
 )
+
+// Strict mode:
+// All operations on locators throw an exception if more
+// than one element matches the locator's selector.
+//
+// See Issue #100 for more details.
 
 // Locator represent a way to find element(s) on the page at any moment.
 type Locator struct {
@@ -30,15 +37,33 @@ func NewLocator(ctx context.Context, selector string, f *Frame, l *log.Logger) *
 	}
 }
 
-// Click on an element using locator's selector with strict mode on.
-func (l *Locator) Click(opts goja.Value) error {
-	l.log.Debugf("Locator:Click", "fid:%s furl:%q sel:%q opts:%+v", l.frame.ID(), l.frame.URL(), l.selector, opts)
+// Clear will clear the input field.
+// This works with the Fill API and fills the input field with an empty string.
+func (l *Locator) Clear(opts *FrameFillOptions) error {
+	l.log.Debugf(
+		"Locator:Clear", "fid:%s furl:%q sel:%q opts:%+v",
+		l.frame.ID(), l.frame.URL(), l.selector, opts,
+	)
 
-	copts := NewFrameClickOptions(l.frame.defaultTimeout())
-	if err := copts.Parse(l.ctx, opts); err != nil {
-		return fmt.Errorf("parsing click options: %w", err)
+	if err := l.fill("", opts); err != nil {
+		return fmt.Errorf("clearing %q: %w", l.selector, err)
 	}
-	if err := l.click(copts); err != nil {
+
+	return nil
+}
+
+// Timeout will return the default timeout or the one set by the user.
+func (l *Locator) Timeout() time.Duration {
+	return l.frame.defaultTimeout()
+}
+
+// Click on an element using locator's selector with strict mode on.
+func (l *Locator) Click(opts *FrameClickOptions) error {
+	l.log.Debugf("Locator:Click", "fid:%s furl:%q sel:%q opts:%+v", l.frame.ID(), l.frame.URL(), l.selector, opts)
+	_, span := TraceAPICall(l.ctx, l.frame.page.targetID.String(), "locator.click")
+	defer span.End()
+
+	if err := l.click(opts); err != nil {
 		return fmt.Errorf("clicking on %q: %w", l.selector, err)
 	}
 
@@ -227,50 +252,28 @@ func (l *Locator) isDisabled(opts *FrameIsDisabledOptions) (bool, error) {
 
 // IsVisible returns true if the element matches the locator's
 // selector and is visible. Otherwise, returns false.
-func (l *Locator) IsVisible(opts goja.Value) bool {
-	l.log.Debugf("Locator:IsVisible", "fid:%s furl:%q sel:%q opts:%+v", l.frame.ID(), l.frame.URL(), l.selector, opts)
+func (l *Locator) IsVisible() (bool, error) {
+	l.log.Debugf("Locator:IsVisible", "fid:%s furl:%q sel:%q", l.frame.ID(), l.frame.URL(), l.selector)
 
-	copts := NewFrameIsVisibleOptions(l.frame.defaultTimeout())
-	if err := copts.Parse(l.ctx, opts); err != nil {
-		k6ext.Panic(l.ctx, "parsing is visible options: %w", err)
-	}
-	visible, err := l.isVisible(copts)
+	visible, err := l.frame.isVisible(l.selector, &FrameIsVisibleOptions{Strict: true})
 	if err != nil {
-		k6ext.Panic(l.ctx, "checking is %q visible: %w", l.selector, err)
+		return false, fmt.Errorf("checking is %q visible: %w", l.selector, err)
 	}
 
-	return visible
-}
-
-// isVisible is like IsVisible but takes parsed options and does not
-// throw an error.
-func (l *Locator) isVisible(opts *FrameIsVisibleOptions) (bool, error) {
-	opts.Strict = true
-	return l.frame.isVisible(l.selector, opts)
+	return visible, nil
 }
 
 // IsHidden returns true if the element matches the locator's
 // selector and is hidden. Otherwise, returns false.
-func (l *Locator) IsHidden(opts goja.Value) bool {
-	l.log.Debugf("Locator:IsHidden", "fid:%s furl:%q sel:%q opts:%+v", l.frame.ID(), l.frame.URL(), l.selector, opts)
+func (l *Locator) IsHidden() (bool, error) {
+	l.log.Debugf("Locator:IsHidden", "fid:%s furl:%q sel:%q", l.frame.ID(), l.frame.URL(), l.selector)
 
-	copts := NewFrameIsHiddenOptions(l.frame.defaultTimeout())
-	if err := copts.Parse(l.ctx, opts); err != nil {
-		k6ext.Panic(l.ctx, "parsing is hidden options: %w", err)
-	}
-	hidden, err := l.isHidden(copts)
+	hidden, err := l.frame.isHidden(l.selector, &FrameIsHiddenOptions{Strict: true})
 	if err != nil {
-		k6ext.Panic(l.ctx, "checking is %q hidden: %w", l.selector, err)
+		return false, fmt.Errorf("checking is %q hidden: %w", l.selector, err)
 	}
 
-	return hidden
-}
-
-// isHidden is like IsHidden but takes parsed options and does not
-// throw an error.
-func (l *Locator) isHidden(opts *FrameIsHiddenOptions) (bool, error) {
-	opts.Strict = true
-	return l.frame.isHidden(l.selector, opts)
+	return hidden, nil
 }
 
 // Fill out the element using locator's selector with strict mode on.
@@ -323,7 +326,7 @@ func (l *Locator) focus(opts *FrameBaseOptions) error {
 }
 
 // GetAttribute of the element using locator's selector with strict mode on.
-func (l *Locator) GetAttribute(name string, opts goja.Value) goja.Value {
+func (l *Locator) GetAttribute(name string, opts goja.Value) any {
 	l.log.Debugf(
 		"Locator:GetAttribute", "fid:%s furl:%q sel:%q name:%q opts:%+v",
 		l.frame.ID(), l.frame.URL(), l.selector, name, opts,
@@ -337,7 +340,7 @@ func (l *Locator) GetAttribute(name string, opts goja.Value) goja.Value {
 		err = fmt.Errorf("parsing get attribute options: %w", err)
 		return nil
 	}
-	var v goja.Value
+	var v any
 	if v, err = l.getAttribute(name, copts); err != nil {
 		err = fmt.Errorf("getting attribute %q of %q: %w", name, l.selector, err)
 		return nil
@@ -346,7 +349,7 @@ func (l *Locator) GetAttribute(name string, opts goja.Value) goja.Value {
 	return v
 }
 
-func (l *Locator) getAttribute(name string, opts *FrameBaseOptions) (goja.Value, error) {
+func (l *Locator) getAttribute(name string, opts *FrameBaseOptions) (any, error) {
 	opts.Strict = true
 	return l.frame.getAttribute(l.selector, name, opts)
 }
@@ -511,6 +514,8 @@ func (l *Locator) Type(text string, opts goja.Value) {
 		"Locator:Type", "fid:%s furl:%q sel:%q text:%q opts:%+v",
 		l.frame.ID(), l.frame.URL(), l.selector, text, opts,
 	)
+	_, span := TraceAPICall(l.ctx, l.frame.page.targetID.String(), "locator.type")
+	defer span.End()
 
 	var err error
 	defer func() { panicOrSlowMo(l.ctx, err) }()
@@ -580,7 +585,7 @@ func (l *Locator) tap(opts *FrameTapOptions) error {
 
 // DispatchEvent dispatches an event for the element matching the
 // locator's selector with strict mode on.
-func (l *Locator) DispatchEvent(typ string, eventInit, opts goja.Value) {
+func (l *Locator) DispatchEvent(typ string, eventInit any, opts *FrameDispatchEventOptions) error {
 	l.log.Debugf(
 		"Locator:DispatchEvent", "fid:%s furl:%q sel:%q typ:%q eventInit:%+v opts:%+v",
 		l.frame.ID(), l.frame.URL(), l.selector, typ, eventInit, opts,
@@ -589,18 +594,14 @@ func (l *Locator) DispatchEvent(typ string, eventInit, opts goja.Value) {
 	var err error
 	defer func() { panicOrSlowMo(l.ctx, err) }()
 
-	popts := NewFrameDispatchEventOptions(l.frame.defaultTimeout())
-	if err = popts.Parse(l.ctx, opts); err != nil {
-		err = fmt.Errorf("parsing dispatch event options: %w", err)
-		return
+	if err = l.dispatchEvent(typ, eventInit, opts); err != nil {
+		return fmt.Errorf("dispatching locator event %q to %q: %w", typ, l.selector, err)
 	}
-	if err = l.dispatchEvent(typ, eventInit, popts); err != nil {
-		err = fmt.Errorf("dispatching event %q to %q: %w", typ, l.selector, err)
-		return
-	}
+
+	return nil
 }
 
-func (l *Locator) dispatchEvent(typ string, eventInit goja.Value, opts *FrameDispatchEventOptions) error {
+func (l *Locator) dispatchEvent(typ string, eventInit any, opts *FrameDispatchEventOptions) error {
 	opts.Strict = true
 	return l.frame.dispatchEvent(l.selector, typ, eventInit, opts)
 }
@@ -621,4 +622,10 @@ func (l *Locator) WaitFor(opts goja.Value) {
 func (l *Locator) waitFor(opts *FrameWaitForSelectorOptions) error {
 	opts.Strict = true
 	return l.frame.waitFor(l.selector, opts)
+}
+
+// DefaultTimeout returns the default timeout for the locator.
+// This is an internal API and should not be used by users.
+func (l *Locator) DefaultTimeout() time.Duration {
+	return l.frame.defaultTimeout()
 }

@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/grafana/xk6-browser/api"
 	"github.com/grafana/xk6-browser/common"
 	"github.com/grafana/xk6-browser/env"
 	"github.com/grafana/xk6-browser/k6ext"
@@ -35,7 +34,6 @@ type BrowserType struct {
 	vu           k6modules.VU
 	hooks        *common.Hooks
 	k6Metrics    *k6ext.CustomMetrics
-	execPath     string // path to the Chromium executable
 	randSrc      *rand.Rand
 	envLookupper env.LookupFunc
 }
@@ -98,7 +96,7 @@ func (b *BrowserType) initContext(ctx context.Context) context.Context {
 }
 
 // Connect attaches k6 browser to an existing browser instance.
-func (b *BrowserType) Connect(ctx context.Context, wsEndpoint string) (api.Browser, error) {
+func (b *BrowserType) Connect(ctx context.Context, wsEndpoint string) (*common.Browser, error) {
 	ctx, browserOpts, logger, err := b.init(ctx, true)
 	if err != nil {
 		return nil, fmt.Errorf("initializing browser type: %w", err)
@@ -151,9 +149,9 @@ func (b *BrowserType) link(
 	return p, nil
 }
 
-// Launch allocates a new Chrome browser process and returns a new api.Browser value,
+// Launch allocates a new Chrome browser process and returns a new Browser value,
 // which can be used for controlling the Chrome browser.
-func (b *BrowserType) Launch(ctx context.Context) (_ api.Browser, browserProcessID int, _ error) {
+func (b *BrowserType) Launch(ctx context.Context) (_ *common.Browser, browserProcessID int, _ error) {
 	ctx, browserOpts, logger, err := b.init(ctx, false)
 	if err != nil {
 		return nil, 0, fmt.Errorf("initializing browser type: %w", err)
@@ -185,7 +183,12 @@ func (b *BrowserType) launch(
 	}
 	flags["user-data-dir"] = dataDir.Dir
 
-	browserProc, err := b.allocate(ctx, opts, flags, dataDir, logger)
+	path, err := executablePath(opts.ExecutablePath, b.envLookupper, exec.LookPath)
+	if err != nil {
+		return nil, 0, fmt.Errorf("finding browser executable: %w", err)
+	}
+
+	browserProc, err := b.allocate(ctx, path, flags, dataDir, logger)
 	if browserProc == nil {
 		return nil, 0, fmt.Errorf("launching browser: %w", err)
 	}
@@ -212,7 +215,7 @@ func (b *BrowserType) tmpdir() string {
 }
 
 // LaunchPersistentContext launches the browser with persistent storage.
-func (b *BrowserType) LaunchPersistentContext(userDataDir string, opts goja.Value) api.Browser {
+func (b *BrowserType) LaunchPersistentContext(_ string, _ goja.Value) *common.Browser {
 	rt := b.vu.Runtime()
 	k6common.Throw(rt, errors.New("BrowserType.LaunchPersistentContext(userDataDir, opts) has not been implemented yet"))
 	return nil
@@ -225,7 +228,7 @@ func (b *BrowserType) Name() string {
 
 // allocate starts a new Chromium browser process and returns it.
 func (b *BrowserType) allocate(
-	ctx context.Context, opts *common.BrowserOptions,
+	ctx context.Context, path string,
 	flags map[string]any, dataDir *storage.Dir,
 	logger *log.Logger,
 ) (_ *common.BrowserProcess, rerr error) {
@@ -241,23 +244,36 @@ func (b *BrowserType) allocate(
 		return nil, err
 	}
 
-	path := opts.ExecutablePath
-	if path == "" {
-		path = b.ExecutablePath()
-	}
-
 	return common.NewLocalBrowserProcess(bProcCtx, path, args, dataDir, bProcCtxCancel, logger) //nolint: wrapcheck
 }
 
-// ExecutablePath returns the path where the extension expects to find the browser executable.
-func (b *BrowserType) ExecutablePath() (execPath string) {
-	if b.execPath != "" {
-		return b.execPath
-	}
-	defer func() {
-		b.execPath = execPath
-	}()
+var (
+	// ErrChromeNotInstalled is returned when the Chrome executable is not found.
+	ErrChromeNotInstalled = errors.New(
+		"k6 couldn't detect google chrome or a chromium-supported browser on this system",
+	)
 
+	// ErrChromeNotFoundAtPath is returned when the Chrome executable is not found at the given path.
+	ErrChromeNotFoundAtPath = errors.New(
+		"k6 couldn't detect google chrome or a chromium-supported browser on the given path",
+	)
+)
+
+// executablePath returns the path where the extension expects to find the browser executable.
+func executablePath(
+	path string,
+	env env.LookupFunc,
+	lookPath func(file string) (string, error), // os.LookPath
+) (string, error) {
+	// find the browser executable in the user provided path
+	if path := strings.TrimSpace(path); path != "" {
+		if _, err := lookPath(path); err == nil {
+			return path, nil
+		}
+		return "", fmt.Errorf("%w: %s", ErrChromeNotFoundAtPath, path)
+	}
+
+	// find the browser executable in the default paths below
 	paths := []string{
 		// Unix-like
 		"headless_shell",
@@ -278,16 +294,17 @@ func (b *BrowserType) ExecutablePath() (execPath string) {
 		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 		"/Applications/Chromium.app/Contents/MacOS/Chromium",
 	}
-	if userProfile, ok := b.envLookupper("USERPROFILE"); ok {
+	// find the browser executable in the user profile
+	if userProfile, ok := env("USERPROFILE"); ok {
 		paths = append(paths, filepath.Join(userProfile, `AppData\Local\Google\Chrome\Application\chrome.exe`))
 	}
 	for _, path := range paths {
-		if _, err := exec.LookPath(path); err == nil {
-			return path
+		if _, err := lookPath(path); err == nil {
+			return path, nil
 		}
 	}
 
-	return ""
+	return "", ErrChromeNotInstalled
 }
 
 // parseArgs parses command-line arguments and returns them.

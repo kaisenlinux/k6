@@ -28,8 +28,34 @@ import (
 	"github.com/dop251/goja"
 )
 
-// Ensure NetworkManager implements the EventEmitter interface.
-var _ EventEmitter = &NetworkManager{}
+// Credentials holds HTTP authentication credentials.
+type Credentials struct {
+	Username string `js:"username"`
+	Password string `js:"password"`
+}
+
+// NewCredentials return a new Credentials.
+func NewCredentials() *Credentials {
+	return &Credentials{}
+}
+
+// Parse credentials details from a given goja credentials value.
+func (c *Credentials) Parse(ctx context.Context, credentials goja.Value) error {
+	rt := k6ext.Runtime(ctx)
+	if credentials != nil && !goja.IsUndefined(credentials) && !goja.IsNull(credentials) {
+		credentials := credentials.ToObject(rt)
+		for _, k := range credentials.Keys() {
+			switch k {
+			case "username":
+				c.Username = credentials.Get(k).String()
+			case "password":
+				c.Password = credentials.Get(k).String()
+			}
+		}
+	}
+
+	return nil
+}
 
 // NetworkManager manages all frames in HTML document.
 type NetworkManager struct {
@@ -54,6 +80,7 @@ type NetworkManager struct {
 
 	extraHTTPHeaders               map[string]string
 	offline                        bool
+	networkProfile                 NetworkProfile
 	userCacheDisabled              bool
 	userReqInterceptionEnabled     bool
 	protocolReqInterceptionEnabled bool
@@ -86,6 +113,7 @@ func NewNetworkManager(
 		reqIDToRequest:   make(map[network.RequestID]*Request),
 		attemptedAuth:    make(map[fetch.RequestID]bool),
 		extraHTTPHeaders: make(map[string]string),
+		networkProfile:   NewNetworkProfile(),
 	}
 	m.initEvents()
 	if err := m.initDomains(); err != nil {
@@ -335,11 +363,12 @@ func (m *NetworkManager) handleEvents(in <-chan Event) bool {
 }
 
 func (m *NetworkManager) onLoadingFailed(event *network.EventLoadingFailed) {
-	req := m.requestFromID(event.RequestID)
-	if req == nil {
+	req, ok := m.requestFromID(event.RequestID)
+	if !ok {
 		// TODO: add handling of iframe document requests starting in one session and ending up in another
 		return
 	}
+
 	req.setErrorText(event.ErrorText)
 	req.responseEndTiming = float64(event.Timestamp.Time().Unix()-req.timestamp.Unix()) * 1000
 	m.deleteRequestByID(event.RequestID)
@@ -347,35 +376,71 @@ func (m *NetworkManager) onLoadingFailed(event *network.EventLoadingFailed) {
 }
 
 func (m *NetworkManager) onLoadingFinished(event *network.EventLoadingFinished) {
-	req := m.requestFromID(event.RequestID)
+	req := m.requestForOnLoadingFinished(event.RequestID)
+	// the request was not created yet.
 	if req == nil {
-		// Handling of iframe document request starting in parent session and ending up in iframe session.
-		if m.parent != nil {
-			reqFromParent := m.parent.requestFromID(event.RequestID)
-
-			// Main requests have matching loaderID and requestID.
-			if reqFromParent != nil && reqFromParent.getDocumentID() == event.RequestID.String() {
-				m.reqsMu.Lock()
-				m.reqIDToRequest[event.RequestID] = reqFromParent
-				m.reqsMu.Unlock()
-				m.parent.deleteRequestByID(event.RequestID)
-				req = reqFromParent
-			} else {
-				return
-			}
-		} else {
-			return
-		}
+		return
 	}
+
 	req.responseEndTiming = float64(event.Timestamp.Time().Unix()-req.timestamp.Unix()) * 1000
+	m.deleteRequestByID(event.RequestID)
+	m.frameManager.requestFinished(req)
+
 	// Skip data and blob URLs when emitting metrics, since they're internal to the browser.
-	if !isInternalURL(req.url) {
+	if isInternalURL(req.url) {
+		return
+	}
+	emitResponseMetrics := func() {
 		req.responseMu.RLock()
 		m.emitResponseMetrics(req.response, req)
 		req.responseMu.RUnlock()
 	}
-	m.deleteRequestByID(event.RequestID)
-	m.frameManager.requestFinished(req)
+	if !req.allowInterception {
+		emitResponseMetrics()
+		return
+	}
+	// When request interception is enabled, we need to process requestPaused messages
+	// from CDP in order to get the response for the request. However, we can't process
+	// them until the request is unblocked. Since we're blocking the NetworkManager
+	// goroutine here, we need to spawn a new goroutine to allow the requestPaused
+	// messages to be processed by the NetworkManager.
+	//
+	// This happens when the main page request redirects before it finishes loading.
+	// So the new redirect request will be blocked until the main page finishes loading.
+	// The main page will wait forever since its subrequest is blocked.
+	go emitResponseMetrics()
+}
+
+// requestForOnLoadingFinished returns the request for the given request ID.
+func (m *NetworkManager) requestForOnLoadingFinished(rid network.RequestID) *Request {
+	r, ok := m.requestFromID(rid)
+
+	// Immediately return if the request is found.
+	if ok {
+		return r
+	}
+
+	// Handle IFrame document requests starting in one session and ending up in another.
+	if m.parent == nil {
+		return nil
+	}
+
+	pr, ok := m.parent.requestFromID(rid)
+	if !ok {
+		return nil
+	}
+	// Requests eminating from the parent have matching requestIDs.
+	if pr.getDocumentID() != rid.String() {
+		return nil
+	}
+
+	// Switch the request to the parent request.
+	m.reqsMu.Lock()
+	m.reqIDToRequest[rid] = pr
+	m.reqsMu.Unlock()
+	m.parent.deleteRequestByID(rid)
+
+	return pr
 }
 
 func isInternalURL(u *url.URL) bool {
@@ -385,8 +450,8 @@ func isInternalURL(u *url.URL) bool {
 func (m *NetworkManager) onRequest(event *network.EventRequestWillBeSent, interceptionID string) {
 	var redirectChain []*Request = nil
 	if event.RedirectResponse != nil {
-		req := m.requestFromID(event.RequestID)
-		if req != nil {
+		req, ok := m.requestFromID(event.RequestID)
+		if ok {
 			m.handleRequestRedirect(req, event.RedirectResponse, event.Timestamp)
 			redirectChain = req.redirectChain
 		}
@@ -399,10 +464,11 @@ func (m *NetworkManager) onRequest(event *network.EventRequestWillBeSent, interc
 	}
 
 	var frame *Frame = nil
+	var ok bool
 	if event.FrameID != "" {
-		frame = m.frameManager.getFrameByID(event.FrameID)
+		frame, ok = m.frameManager.getFrameByID(event.FrameID)
 	}
-	if frame == nil {
+	if !ok {
 		m.logger.Debugf("NetworkManager:onRequest", "url:%s method:%s type:%s fid:%s frame is nil",
 			event.Request.URL, event.Request.Method, event.Initiator.Type, event.FrameID)
 	}
@@ -561,15 +627,15 @@ func (m *NetworkManager) onAuthRequired(event *fetch.EventAuthRequired) {
 }
 
 func (m *NetworkManager) onRequestServedFromCache(event *network.EventRequestServedFromCache) {
-	req := m.requestFromID(event.RequestID)
-	if req != nil {
+	req, ok := m.requestFromID(event.RequestID)
+	if ok {
 		req.setLoadedFromCache(true)
 	}
 }
 
 func (m *NetworkManager) onResponseReceived(event *network.EventResponseReceived) {
-	req := m.requestFromID(event.RequestID)
-	if req == nil {
+	req, ok := m.requestFromID(event.RequestID)
+	if !ok {
 		return
 	}
 	resp := NewHTTPResponse(m.ctx, req, event.Response, event.Timestamp)
@@ -579,10 +645,13 @@ func (m *NetworkManager) onResponseReceived(event *network.EventResponseReceived
 	m.frameManager.requestReceivedResponse(resp)
 }
 
-func (m *NetworkManager) requestFromID(reqID network.RequestID) *Request {
+func (m *NetworkManager) requestFromID(reqID network.RequestID) (*Request, bool) {
 	m.reqsMu.RLock()
 	defer m.reqsMu.RUnlock()
-	return m.reqIDToRequest[reqID]
+
+	r, ok := m.reqIDToRequest[reqID]
+
+	return r, ok
 }
 
 func (m *NetworkManager) setRequestInterception(value bool) error {
@@ -667,10 +736,36 @@ func (m *NetworkManager) SetOfflineMode(offline bool) {
 	}
 	m.offline = offline
 
-	action := network.EmulateNetworkConditions(m.offline, 0, -1, -1)
+	action := network.EmulateNetworkConditions(
+		m.offline,
+		m.networkProfile.Latency,
+		m.networkProfile.Download,
+		m.networkProfile.Upload,
+	)
 	if err := action.Do(cdp.WithExecutor(m.ctx, m.session)); err != nil {
 		k6ext.Panic(m.ctx, "setting offline mode: %w", err)
 	}
+}
+
+// ThrottleNetwork changes the network attributes in chrome to simulate slower
+// networks e.g. a slow 3G connection.
+func (m *NetworkManager) ThrottleNetwork(networkProfile NetworkProfile) error {
+	if m.networkProfile == networkProfile {
+		return nil
+	}
+	m.networkProfile = networkProfile
+
+	action := network.EmulateNetworkConditions(
+		m.offline,
+		m.networkProfile.Latency,
+		m.networkProfile.Download,
+		m.networkProfile.Upload,
+	)
+	if err := action.Do(cdp.WithExecutor(m.ctx, m.session)); err != nil {
+		return fmt.Errorf("throttling network: %w", err)
+	}
+
+	return nil
 }
 
 // SetUserAgent overrides the browser user agent string.

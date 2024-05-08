@@ -34,6 +34,7 @@ import (
 
 	"go.k6.io/k6/errext"
 	"go.k6.io/k6/execution"
+	"go.k6.io/k6/execution/local"
 	"go.k6.io/k6/js/modules/k6"
 	k6http "go.k6.io/k6/js/modules/k6/http"
 	k6metrics "go.k6.io/k6/js/modules/k6/metrics"
@@ -128,10 +129,10 @@ func TestRunnerOptions(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, r.Bundle.Options, r.GetOptions())
 			assert.Equal(t, null.NewBool(false, false), r.Bundle.Options.Paused)
-			r.SetOptions(lib.Options{Paused: null.BoolFrom(true)})
+			require.NoError(t, r.SetOptions(lib.Options{Paused: null.BoolFrom(true)}))
 			assert.Equal(t, r.Bundle.Options, r.GetOptions())
 			assert.Equal(t, null.NewBool(true, true), r.Bundle.Options.Paused)
-			r.SetOptions(lib.Options{Paused: null.BoolFrom(false)})
+			require.NoError(t, r.SetOptions(lib.Options{Paused: null.BoolFrom(false)}))
 			assert.Equal(t, r.Bundle.Options, r.GetOptions())
 			assert.Equal(t, null.NewBool(false, true), r.Bundle.Options.Paused)
 		})
@@ -213,7 +214,7 @@ func TestOptionsSettingToScript(t *testing.T) {
 			newOptions := lib.Options{
 				TeardownTimeout: types.NullDurationFrom(4 * time.Second),
 			}
-			r.SetOptions(newOptions)
+			require.NoError(t, r.SetOptions(newOptions))
 			require.Equal(t, newOptions, r.GetOptions())
 
 			samples := make(chan metrics.SampleContainer, 100)
@@ -383,7 +384,7 @@ func TestDataIsolation(t *testing.T) {
 		RunTags:          runner.preInitState.Registry.RootTagSet().WithTagsFromMap(options.RunTags),
 	}
 
-	execScheduler, err := execution.NewScheduler(testRunState)
+	execScheduler, err := execution.NewScheduler(testRunState, local.NewController())
 	require.NoError(t, err)
 
 	globalCtx, globalCancel := context.WithCancel(context.Background())
@@ -636,7 +637,7 @@ func TestVURunContext(t *testing.T) {
 		exports.default = function() { fn(); }
 	`)
 	require.NoError(t, err)
-	r1.SetOptions(r1.GetOptions().Apply(lib.Options{Throw: null.BoolFrom(true)}))
+	require.NoError(t, r1.SetOptions(r1.GetOptions().Apply(lib.Options{Throw: null.BoolFrom(true)})))
 
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
@@ -660,7 +661,7 @@ func TestVURunContext(t *testing.T) {
 			require.NoError(t, err)
 
 			fnCalled := false
-			vu.Runtime.Set("fn", func() {
+			require.NoError(t, vu.Runtime.Set("fn", func() {
 				fnCalled = true
 
 				require.NotNil(t, vu.moduleVUImpl.Runtime())
@@ -673,7 +674,7 @@ func TestVURunContext(t *testing.T) {
 				assert.NotNil(t, state.Logger)
 				assert.Equal(t, r.GetDefaultGroup(), state.Group)
 				assert.Equal(t, vu.Transport, state.Transport)
-			})
+			}))
 
 			activeVU := vu.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = activeVU.RunOnce()
@@ -705,13 +706,8 @@ func TestVURunInterrupt(t *testing.T) {
 		name, r := name, r
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			samples := make(chan metrics.SampleContainer, 100)
+			samples := newDevNullSampleChannel()
 			defer close(samples)
-			go func() {
-				for range samples {
-				}
-			}()
-
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 			defer cancel()
 
@@ -749,12 +745,8 @@ func TestVURunInterruptDoesntPanic(t *testing.T) {
 			t.Parallel()
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			samples := make(chan metrics.SampleContainer, 100)
+			samples := newDevNullSampleChannel()
 			defer close(samples)
-			go func() {
-				for range samples {
-				}
-			}()
 			var wg sync.WaitGroup
 
 			initVU, err := r.newVU(ctx, 1, 1, samples)
@@ -774,7 +766,7 @@ func TestVURunInterruptDoesntPanic(t *testing.T) {
 					assert.Contains(t, vuErr.Error(), "context canceled")
 				}()
 				<-ch
-				time.Sleep(time.Millisecond * 1) // NOTE: increase this in case of problems ;)
+				time.Sleep(time.Microsecond * 1) // NOTE: increase this in case of problems ;)
 				newCancel()
 				wg.Wait()
 			}
@@ -822,23 +814,23 @@ func TestVUIntegrationGroups(t *testing.T) {
 			fnOuterCalled := false
 			fnInnerCalled := false
 			fnNestedCalled := false
-			vu.Runtime.Set("fnOuter", func() {
+			require.NoError(t, vu.Runtime.Set("fnOuter", func() {
 				fnOuterCalled = true
 				assert.Equal(t, r.GetDefaultGroup(), vu.state.Group)
-			})
-			vu.Runtime.Set("fnInner", func() {
+			}))
+			require.NoError(t, vu.Runtime.Set("fnInner", func() {
 				fnInnerCalled = true
 				g := vu.state.Group
 				assert.Equal(t, "my group", g.Name)
 				assert.Equal(t, r.GetDefaultGroup(), g.Parent)
-			})
-			vu.Runtime.Set("fnNested", func() {
+			}))
+			require.NoError(t, vu.Runtime.Set("fnNested", func() {
 				fnNestedCalled = true
 				g := vu.state.Group
 				assert.Equal(t, "nested group", g.Name)
 				assert.Equal(t, "my group", g.Parent.Name)
 				assert.Equal(t, r.GetDefaultGroup(), g.Parent.Parent)
-			})
+			}))
 
 			activeVU := vu.Activate(&lib.VUActivationParams{RunContext: ctx})
 			err = activeVU.RunOnce()
@@ -919,7 +911,11 @@ func TestVUIntegrationMetrics(t *testing.T) {
 	}
 }
 
-func GenerateTLSCertificate(t *testing.T, host string, notBefore time.Time, validFor time.Duration) ([]byte, []byte) {
+func generateTLSCertificate(t *testing.T, host string, notBefore time.Time, validFor time.Duration) ([]byte, []byte) {
+	return generateTLSCertificateWithCA(t, host, notBefore, validFor, nil, nil)
+}
+
+func generateTLSCertificateWithCA(t *testing.T, host string, notBefore time.Time, validFor time.Duration, parent *x509.Certificate, ppriv *rsa.PrivateKey) ([]byte, []byte) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 
@@ -946,7 +942,6 @@ func GenerateTLSCertificate(t *testing.T, host string, notBefore time.Time, vali
 		NotAfter:  notAfter,
 
 		KeyUsage:              keyUsage,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		SignatureAlgorithm:    x509.SHA256WithRSA,
 	}
@@ -960,10 +955,14 @@ func GenerateTLSCertificate(t *testing.T, host string, notBefore time.Time, vali
 		}
 	}
 
-	template.IsCA = true
-	template.KeyUsage |= x509.KeyUsageCertSign
+	if parent == nil {
+		template.IsCA = true
+		template.KeyUsage |= x509.KeyUsageCertSign
+		parent = &template
+		ppriv = priv
+	}
 
-	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, parent, &priv.PublicKey, ppriv)
 	require.NoError(t, err)
 
 	certPem := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
@@ -976,7 +975,7 @@ func GenerateTLSCertificate(t *testing.T, host string, notBefore time.Time, vali
 	return certPem, keyPem
 }
 
-func GetTestServerWithCertificate(t *testing.T, certPem, key []byte) *httptest.Server {
+func getTestServerWithCertificate(t *testing.T, certPem, key []byte) *httptest.Server {
 	server := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -1024,8 +1023,8 @@ func GetTestServerWithCertificate(t *testing.T, certPem, key []byte) *httptest.S
 
 func TestVUIntegrationInsecureRequests(t *testing.T) {
 	t.Parallel()
-	certPem, keyPem := GenerateTLSCertificate(t, "mybadssl.localhost", time.Now(), 0)
-	s := GetTestServerWithCertificate(t, certPem, keyPem)
+	certPem, keyPem := generateTLSCertificate(t, "mybadssl.localhost", time.Now(), 0)
+	s := getTestServerWithCertificate(t, certPem, keyPem)
 	go func() {
 		_ = s.Config.Serve(s.Listener)
 	}()
@@ -1296,7 +1295,7 @@ func TestVUIntegrationHosts(t *testing.T) {
 				`))
 	require.NoError(t, err)
 
-	r1.SetOptions(lib.Options{
+	require.NoError(t, r1.SetOptions(lib.Options{
 		Throw: null.BoolFrom(true),
 		Hosts: func() types.NullHosts {
 			hosts, er := types.NewNullHosts(map[string]types.Host{
@@ -1306,7 +1305,7 @@ func TestVUIntegrationHosts(t *testing.T) {
 
 			return hosts
 		}(),
-	})
+	}))
 
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
@@ -1337,8 +1336,8 @@ func TestVUIntegrationHosts(t *testing.T) {
 
 func TestVUIntegrationTLSConfig(t *testing.T) {
 	t.Parallel()
-	certPem, keyPem := GenerateTLSCertificate(t, "sha256-badssl.localhost", time.Now(), time.Hour)
-	s := GetTestServerWithCertificate(t, certPem, keyPem)
+	certPem, keyPem := generateTLSCertificate(t, "sha256-badssl.localhost", time.Now(), time.Hour)
+	s := getTestServerWithCertificate(t, certPem, keyPem)
 	go func() {
 		_ = s.Config.Serve(s.Listener)
 	}()
@@ -1385,7 +1384,7 @@ func TestVUIntegrationTLSConfig(t *testing.T) {
 			"",
 		},
 		"UnsupportedVersion": {
-			lib.Options{TLSVersion: &lib.TLSVersions{Min: tls.VersionSSL30, Max: tls.VersionSSL30}},
+			lib.Options{TLSVersion: &lib.TLSVersions{Min: tls.VersionSSL30, Max: tls.VersionSSL30}}, //nolint:staticcheck
 			unsupportedVersionErrorMsg,
 		},
 	}
@@ -1632,12 +1631,12 @@ func TestVUIntegrationCookiesNoReset(t *testing.T) {
 			}
 		`))
 	require.NoError(t, err)
-	r1.SetOptions(lib.Options{
+	require.NoError(t, r1.SetOptions(lib.Options{
 		Throw:          null.BoolFrom(true),
 		MaxRedirects:   null.IntFrom(10),
 		Hosts:          types.NullHosts{Trie: tb.Dialer.Hosts},
 		NoCookiesReset: null.BoolFrom(true),
-	})
+	}))
 
 	registry := metrics.NewRegistry()
 	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
@@ -1708,56 +1707,32 @@ func TestVUIntegrationVUID(t *testing.T) {
 	}
 }
 
-/*
-CA key:
------BEGIN EC PRIVATE KEY-----
-MHcCAQEEIDEm8bxihqYfAsWP39o5DpkAksPBw+3rlDHNX+d69oYGoAoGCCqGSM49
-AwEHoUQDQgAEeeuCFQsdraFJr8JaKbAKfjYpZ2U+p3r/OzcmAsjFO8EckmV9uFZs
-Gq3JurKi9Z3dDKQcwinHQ1malicbwWhamQ==
------END EC PRIVATE KEY-----
-*/
 func TestVUIntegrationClientCerts(t *testing.T) {
 	t.Parallel()
+
+	// Generate CA key and certificate
+	caCertPem, caKeyPem := generateTLSCertificate(t, "127.0.0.1", time.Now(), time.Hour)
+
+	caCertBlock, _ := pem.Decode(caCertPem)
+	caCert, err := x509.ParseCertificate(caCertBlock.Bytes)
+	require.NoError(t, err)
+
+	caKeyBlock, _ := pem.Decode(caKeyPem)
+	caKeyAny, err := x509.ParsePKCS8PrivateKey(caKeyBlock.Bytes)
+	require.NoError(t, err)
+	caKey, ok := caKeyAny.(*rsa.PrivateKey)
+	require.True(t, ok)
+
+	// Generate server key and certificate
+	srvCertPem, srvKeyPem := generateTLSCertificateWithCA(t, "127.0.0.1", time.Now(), time.Hour, caCert, caKey)
+
+	// Generate client Key and Certificate
+	clCertPem, clKeyPem := generateTLSCertificateWithCA(t, "127.0.0.1", time.Now(), time.Hour, caCert, caKey)
+
 	clientCAPool := x509.NewCertPool()
-	assert.True(t, clientCAPool.AppendCertsFromPEM(
-		[]byte("-----BEGIN CERTIFICATE-----\n"+
-			"MIIBWzCCAQGgAwIBAgIJAIQMBgLi+DV6MAoGCCqGSM49BAMCMBAxDjAMBgNVBAMM\n"+
-			"BU15IENBMCAXDTIyMDEyMTEyMjkzNloYDzMwMjEwNTI0MTIyOTM2WjAQMQ4wDAYD\n"+
-			"VQQDDAVNeSBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABHnrghULHa2hSa/C\n"+
-			"WimwCn42KWdlPqd6/zs3JgLIxTvBHJJlfbhWbBqtybqyovWd3QykHMIpx0NZmpYn\n"+
-			"G8FoWpmjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MB0GA1Ud\n"+
-			"DgQWBBSkukBA8lgFvvBJAYKsoSUR+PX71jAKBggqhkjOPQQDAgNIADBFAiEAiFF7\n"+
-			"Y54CMNRSBSVMgd4mQgrzJInRH88KpLsQ7VeOAaQCIEa0vaLln9zxIDZQKocml4Db\n"+
-			"AEJr8tDzMKIds6sRTBT4\n"+
-			"-----END CERTIFICATE-----"),
-	))
-	serverCert, err := tls.X509KeyPair(
-		[]byte("-----BEGIN CERTIFICATE-----\n"+
-			"MIIBcTCCARigAwIBAgIJAIP0njRt16gbMAoGCCqGSM49BAMCMBAxDjAMBgNVBAMM\n"+
-			"BU15IENBMCAXDTIyMDEyMTE1MTA0OVoYDzMwMjEwNTI0MTUxMDQ5WjAZMRcwFQYD\n"+
-			"VQQDDA4xMjcuMC4wLjE6Njk2OTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABH8Y\n"+
-			"exy5LI9r+RNwVpf/5ZX86EigMYHp9YOyiUMmfUfvDig+BGhlwjm7Lh2941Gz4amO\n"+
-			"lpN2YAkcd0wnNLHkVOmjUDBOMA4GA1UdDwEB/wQEAwIBBjAMBgNVHRMBAf8EAjAA\n"+
-			"MB0GA1UdDgQWBBQ9cIYUwwzfzBXPyRGB5tNpAgHWujAPBgNVHREECDAGhwR/AAAB\n"+
-			"MAoGCCqGSM49BAMCA0cAMEQCIDjRZlg+jKgI9K99HOM2wS9+URr6R1/FYLZYBtMc\n"+
-			"pq3hAiB9NQxNqV459fgN0BpbiLrEvJjquRFoUr9BWsG+hHrHtQ==\n"+
-			"-----END CERTIFICATE-----\n"+
-			"-----BEGIN CERTIFICATE-----\n"+
-			"MIIBWzCCAQGgAwIBAgIJAIQMBgLi+DV6MAoGCCqGSM49BAMCMBAxDjAMBgNVBAMM\n"+
-			"BU15IENBMCAXDTIyMDEyMTEyMjkzNloYDzMwMjEwNTI0MTIyOTM2WjAQMQ4wDAYD\n"+
-			"VQQDDAVNeSBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABHnrghULHa2hSa/C\n"+
-			"WimwCn42KWdlPqd6/zs3JgLIxTvBHJJlfbhWbBqtybqyovWd3QykHMIpx0NZmpYn\n"+
-			"G8FoWpmjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MB0GA1Ud\n"+
-			"DgQWBBSkukBA8lgFvvBJAYKsoSUR+PX71jAKBggqhkjOPQQDAgNIADBFAiEAiFF7\n"+
-			"Y54CMNRSBSVMgd4mQgrzJInRH88KpLsQ7VeOAaQCIEa0vaLln9zxIDZQKocml4Db\n"+
-			"AEJr8tDzMKIds6sRTBT4\n"+
-			"-----END CERTIFICATE-----"),
-		[]byte("-----BEGIN EC PRIVATE KEY-----\n"+
-			"MHcCAQEEIHNpjs0P9/ejoUYF5Agzf9clHR4PwBsVfZ+JgslfuBg1oAoGCCqGSM49\n"+
-			"AwEHoUQDQgAEfxh7HLksj2v5E3BWl//llfzoSKAxgen1g7KJQyZ9R+8OKD4EaGXC\n"+
-			"ObsuHb3jUbPhqY6Wk3ZgCRx3TCc0seRU6Q==\n"+
-			"-----END EC PRIVATE KEY-----"),
-	)
+	assert.True(t, clientCAPool.AppendCertsFromPEM(caCertPem))
+
+	serverCert, err := tls.X509KeyPair(append(srvCertPem, caCertPem...), srvKeyPem)
 	require.NoError(t, err)
 
 	testdata := map[string]struct {
@@ -1772,13 +1747,13 @@ func TestVUIntegrationClientCerts(t *testing.T) {
 		"WithoutDomains":   {true, false, true, ""},
 	}
 
-	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{ //nolint:gosec
 		Certificates: []tls.Certificate{serverCert},
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		ClientCAs:    clientCAPool,
 	})
 	require.NoError(t, err)
-	srv := &http.Server{
+	srv := &http.Server{ //nolint:gosec
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			_, _ = fmt.Fprintf(w, "ok")
 		}),
@@ -1815,21 +1790,8 @@ func TestVUIntegrationClientCerts(t *testing.T) {
 				opt.TLSAuth = []*lib.TLSAuth{
 					{
 						TLSAuthFields: lib.TLSAuthFields{
-							Cert: "-----BEGIN CERTIFICATE-----\n" +
-								"MIIBVzCB/6ADAgECAgkAg/SeNG3XqB0wCgYIKoZIzj0EAwIwEDEOMAwGA1UEAwwF\n" +
-								"TXkgQ0EwIBcNMjIwMTIxMTUxMjM0WhgPMzAyMTA1MjQxNTEyMzRaMBExDzANBgNV\n" +
-								"BAMMBmNsaWVudDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABKM7OJQMYG4KLtDA\n" +
-								"gZ8zOg2PimHMmQnjD2HtI4cSwIUJJnvHWLowbFe9fk6XeP9b3dK1ImUI++/EZdVr\n" +
-								"ABAcngejPzA9MA4GA1UdDwEB/wQEAwIBBjAMBgNVHRMBAf8EAjAAMB0GA1UdDgQW\n" +
-								"BBSttJe1mcPEnBOZ6wvKPG4zL0m1CzAKBggqhkjOPQQDAgNHADBEAiBPSLgKA/r9\n" +
-								"u/FW6W+oy6Odm1kdNMGCI472iTn545GwJgIgb3UQPOUTOj0IN4JLJYfmYyXviqsy\n" +
-								"zk9eWNHFXDA9U6U=\n" +
-								"-----END CERTIFICATE-----",
-							Key: "-----BEGIN EC PRIVATE KEY-----\n" +
-								"MHcCAQEEINDaMGkOT3thu1A0LfLJr3Jd011/aEG6OArmEQaujwgpoAoGCCqGSM49\n" +
-								"AwEHoUQDQgAEozs4lAxgbgou0MCBnzM6DY+KYcyZCeMPYe0jhxLAhQkme8dYujBs\n" +
-								"V71+Tpd4/1vd0rUiZQj778Rl1WsAEByeBw==\n" +
-								"-----END EC PRIVATE KEY-----",
+							Cert: string(clCertPem),
+							Key:  string(clKeyPem),
 						},
 					},
 				}
@@ -2292,10 +2254,12 @@ func TestVUPanic(t *testing.T) {
 			logger.AddHook(hook)
 
 			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
-			vu.(*ActiveVU).Runtime.Set("panic", func(str string) { panic(str) })
-			vu.(*ActiveVU).state.Logger = logger
+			activeVU, ok := vu.(*ActiveVU)
+			require.True(t, ok)
+			require.NoError(t, activeVU.Runtime.Set("panic", func(str string) { panic(str) }))
+			activeVU.state.Logger = logger
 
-			vu.(*ActiveVU).Console.logger = logger.WithField("source", "console")
+			activeVU.Console.logger = logger.WithField("source", "console")
 			err = vu.RunOnce()
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "a panic occurred during JS execution: here we panic")
@@ -2704,7 +2668,7 @@ func TestExecutionInfo(t *testing.T) {
 				Runner:           r,
 			}
 
-			execScheduler, err := execution.NewScheduler(testRunState)
+			execScheduler, err := execution.NewScheduler(testRunState, local.NewController())
 			require.NoError(t, err)
 
 			ctx = lib.WithExecutionState(ctx, execScheduler.GetState())

@@ -2,26 +2,22 @@ package browser
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"reflect"
+	"time"
 
 	"github.com/dop251/goja"
 
-	"github.com/grafana/xk6-browser/api"
+	"github.com/grafana/xk6-browser/common"
 	"github.com/grafana/xk6-browser/k6error"
 	"github.com/grafana/xk6-browser/k6ext"
 
 	k6common "go.k6.io/k6/js/common"
 )
 
-// mapping is a type of mapping between our API (api/) and the JS
-// module. It acts like a bridge and allows adding wildcard methods
+// mapping is a type for mapping our module API to Goja.
+// It acts like a bridge and allows adding wildcard methods
 // and customization over our API.
-//
-// TODO
-// We should put this type back in when the following issue is resolved
-// on the Goja side:
-// https://github.com/dop251/goja/issues/469
 type mapping = map[string]any
 
 // mapBrowserToGoja maps the browser API to the JS module.
@@ -44,42 +40,72 @@ func mapBrowserToGoja(vu moduleVU) *goja.Object {
 }
 
 // mapLocator API to the JS module.
-func mapLocator(vu moduleVU, lo api.Locator) mapping {
+func mapLocator(vu moduleVU, lo *common.Locator) mapping {
 	return mapping{
-		"click": func(opts goja.Value) *goja.Promise {
-			return k6ext.Promise(vu.Context(), func() (any, error) {
-				err := lo.Click(opts)
-				return nil, err //nolint:wrapcheck
-			})
+		"clear": func(opts goja.Value) error {
+			ctx := vu.Context()
+
+			copts := common.NewFrameFillOptions(lo.Timeout())
+			if err := copts.Parse(ctx, opts); err != nil {
+				return fmt.Errorf("parsing clear options: %w", err)
+			}
+
+			return lo.Clear(copts) //nolint:wrapcheck
 		},
-		"dblclick":      lo.Dblclick,
-		"check":         lo.Check,
-		"uncheck":       lo.Uncheck,
-		"isChecked":     lo.IsChecked,
-		"isEditable":    lo.IsEditable,
-		"isEnabled":     lo.IsEnabled,
-		"isDisabled":    lo.IsDisabled,
-		"isVisible":     lo.IsVisible,
-		"isHidden":      lo.IsHidden,
-		"fill":          lo.Fill,
-		"focus":         lo.Focus,
-		"getAttribute":  lo.GetAttribute,
-		"innerHTML":     lo.InnerHTML,
-		"innerText":     lo.InnerText,
-		"textContent":   lo.TextContent,
-		"inputValue":    lo.InputValue,
-		"selectOption":  lo.SelectOption,
-		"press":         lo.Press,
-		"type":          lo.Type,
-		"hover":         lo.Hover,
-		"tap":           lo.Tap,
-		"dispatchEvent": lo.DispatchEvent,
-		"waitFor":       lo.WaitFor,
+		"click": func(opts goja.Value) (*goja.Promise, error) {
+			popts, err := parseFrameClickOptions(vu.Context(), opts, lo.Timeout())
+			if err != nil {
+				return nil, err
+			}
+
+			return k6ext.Promise(vu.Context(), func() (any, error) {
+				return nil, lo.Click(popts) //nolint:wrapcheck
+			}), nil
+		},
+		"dblclick":     lo.Dblclick,
+		"check":        lo.Check,
+		"uncheck":      lo.Uncheck,
+		"isChecked":    lo.IsChecked,
+		"isEditable":   lo.IsEditable,
+		"isEnabled":    lo.IsEnabled,
+		"isDisabled":   lo.IsDisabled,
+		"isVisible":    lo.IsVisible,
+		"isHidden":     lo.IsHidden,
+		"fill":         lo.Fill,
+		"focus":        lo.Focus,
+		"getAttribute": lo.GetAttribute,
+		"innerHTML":    lo.InnerHTML,
+		"innerText":    lo.InnerText,
+		"textContent":  lo.TextContent,
+		"inputValue":   lo.InputValue,
+		"selectOption": lo.SelectOption,
+		"press":        lo.Press,
+		"type":         lo.Type,
+		"hover":        lo.Hover,
+		"tap":          lo.Tap,
+		"dispatchEvent": func(typ string, eventInit, opts goja.Value) error {
+			popts := common.NewFrameDispatchEventOptions(lo.DefaultTimeout())
+			if err := popts.Parse(vu.Context(), opts); err != nil {
+				return fmt.Errorf("parsing locator dispatch event options: %w", err)
+			}
+			return lo.DispatchEvent(typ, exportArg(eventInit), popts) //nolint:wrapcheck
+		},
+		"waitFor": lo.WaitFor,
 	}
 }
 
+func parseFrameClickOptions(
+	ctx context.Context, opts goja.Value, defaultTimeout time.Duration,
+) (*common.FrameClickOptions, error) {
+	copts := common.NewFrameClickOptions(defaultTimeout)
+	if err := copts.Parse(ctx, opts); err != nil {
+		return nil, fmt.Errorf("parsing click options: %w", err)
+	}
+	return copts, nil
+}
+
 // mapRequest to the JS module.
-func mapRequest(vu moduleVU, r api.Request) mapping {
+func mapRequest(vu moduleVU, r *common.Request) mapping {
 	rt := vu.Runtime()
 	maps := mapping{
 		"allHeaders": r.AllHeaders,
@@ -118,7 +144,7 @@ func mapRequest(vu moduleVU, r api.Request) mapping {
 }
 
 // mapResponse to the JS module.
-func mapResponse(vu moduleVU, r api.Response) mapping {
+func mapResponse(vu moduleVU, r *common.Response) mapping {
 	if r == nil {
 		return nil
 	}
@@ -153,17 +179,23 @@ func mapResponse(vu moduleVU, r api.Response) mapping {
 }
 
 // mapJSHandle to the JS module.
-func mapJSHandle(vu moduleVU, jsh api.JSHandle) mapping {
+func mapJSHandle(vu moduleVU, jsh common.JSHandleAPI) mapping {
 	rt := vu.Runtime()
 	return mapping{
 		"asElement": func() *goja.Object {
 			m := mapElementHandle(vu, jsh.AsElement())
 			return rt.ToValue(m).ToObject(rt)
 		},
-		"dispose":  jsh.Dispose,
-		"evaluate": jsh.Evaluate,
-		"evaluateHandle": func(pageFunc goja.Value, args ...goja.Value) (mapping, error) {
-			h, err := jsh.EvaluateHandle(pageFunc, args...)
+		"dispose": jsh.Dispose,
+		"evaluate": func(pageFunc goja.Value, gargs ...goja.Value) any {
+			args := make([]any, 0, len(gargs))
+			for _, a := range gargs {
+				args = append(args, exportArg(a))
+			}
+			return jsh.Evaluate(pageFunc.String(), args...)
+		},
+		"evaluateHandle": func(pageFunc goja.Value, gargs ...goja.Value) (mapping, error) {
+			h, err := jsh.EvaluateHandle(pageFunc.String(), exportArgs(gargs)...)
 			if err != nil {
 				return nil, err //nolint:wrapcheck
 			}
@@ -195,15 +227,23 @@ func mapJSHandle(vu moduleVU, jsh api.JSHandle) mapping {
 // mapElementHandle to the JS module.
 //
 //nolint:funlen
-func mapElementHandle(vu moduleVU, eh api.ElementHandle) mapping {
+func mapElementHandle(vu moduleVU, eh *common.ElementHandle) mapping {
+	rt := vu.Runtime()
 	maps := mapping{
 		"boundingBox": eh.BoundingBox,
 		"check":       eh.Check,
-		"click": func(opts goja.Value) *goja.Promise {
+		"click": func(opts goja.Value) (*goja.Promise, error) {
+			ctx := vu.Context()
+
+			popts := common.NewElementHandleClickOptions(eh.Timeout())
+			if err := popts.Parse(ctx, opts); err != nil {
+				return nil, fmt.Errorf("parsing element click options: %w", err)
+			}
+
 			return k6ext.Promise(vu.Context(), func() (any, error) {
-				err := eh.Click(opts)
+				err := eh.Click(popts)
 				return nil, err //nolint:wrapcheck
-			})
+			}), nil
 		},
 		"contentFrame": func() (mapping, error) {
 			f, err := eh.ContentFrame()
@@ -212,21 +252,23 @@ func mapElementHandle(vu moduleVU, eh api.ElementHandle) mapping {
 			}
 			return mapFrame(vu, f), nil
 		},
-		"dblclick":      eh.Dblclick,
-		"dispatchEvent": eh.DispatchEvent,
-		"fill":          eh.Fill,
-		"focus":         eh.Focus,
-		"getAttribute":  eh.GetAttribute,
-		"hover":         eh.Hover,
-		"innerHTML":     eh.InnerHTML,
-		"innerText":     eh.InnerText,
-		"inputValue":    eh.InputValue,
-		"isChecked":     eh.IsChecked,
-		"isDisabled":    eh.IsDisabled,
-		"isEditable":    eh.IsEditable,
-		"isEnabled":     eh.IsEnabled,
-		"isHidden":      eh.IsHidden,
-		"isVisible":     eh.IsVisible,
+		"dblclick": eh.Dblclick,
+		"dispatchEvent": func(typ string, eventInit goja.Value) error {
+			return eh.DispatchEvent(typ, exportArg(eventInit)) //nolint:wrapcheck
+		},
+		"fill":         eh.Fill,
+		"focus":        eh.Focus,
+		"getAttribute": eh.GetAttribute,
+		"hover":        eh.Hover,
+		"innerHTML":    eh.InnerHTML,
+		"innerText":    eh.InnerText,
+		"inputValue":   eh.InputValue,
+		"isChecked":    eh.IsChecked,
+		"isDisabled":   eh.IsDisabled,
+		"isEditable":   eh.IsEditable,
+		"isEnabled":    eh.IsEnabled,
+		"isHidden":     eh.IsHidden,
+		"isVisible":    eh.IsVisible,
 		"ownerFrame": func() (mapping, error) {
 			f, err := eh.OwnerFrame()
 			if err != nil {
@@ -234,8 +276,24 @@ func mapElementHandle(vu moduleVU, eh api.ElementHandle) mapping {
 			}
 			return mapFrame(vu, f), nil
 		},
-		"press":                  eh.Press,
-		"screenshot":             eh.Screenshot,
+		"press": eh.Press,
+		"screenshot": func(opts goja.Value) (*goja.ArrayBuffer, error) {
+			ctx := vu.Context()
+
+			popts := common.NewElementHandleScreenshotOptions(eh.Timeout())
+			if err := popts.Parse(ctx, opts); err != nil {
+				return nil, fmt.Errorf("parsing frame screenshot options: %w", err)
+			}
+
+			bb, err := eh.Screenshot(popts, vu.filePersister)
+			if err != nil {
+				return nil, err //nolint:wrapcheck
+			}
+
+			ab := rt.NewArrayBuffer(bb)
+
+			return &ab, nil
+		},
 		"scrollIntoViewIfNeeded": eh.ScrollIntoViewIfNeeded,
 		"selectOption":           eh.SelectOption,
 		"selectText":             eh.SelectText,
@@ -254,9 +312,15 @@ func mapElementHandle(vu moduleVU, eh api.ElementHandle) mapping {
 		},
 	}
 	maps["$"] = func(selector string) (mapping, error) {
-		eh, err := eh.Query(selector)
+		eh, err := eh.Query(selector, common.StrictModeOff)
 		if err != nil {
 			return nil, err //nolint:wrapcheck
+		}
+		// ElementHandle can be null when the selector does not match any elements.
+		// We do not want to map nil elementHandles since the expectation is a
+		// null result in the test script for this case.
+		if eh == nil {
+			return nil, nil //nolint:nilnil
 		}
 		ehm := mapElementHandle(vu, eh)
 		return ehm, nil
@@ -285,7 +349,7 @@ func mapElementHandle(vu moduleVU, eh api.ElementHandle) mapping {
 // mapFrame to the JS module.
 //
 //nolint:funlen
-func mapFrame(vu moduleVU, f api.Frame) mapping {
+func mapFrame(vu moduleVU, f *common.Frame) mapping {
 	rt := vu.Runtime()
 	maps := mapping{
 		"addScriptTag": f.AddScriptTag,
@@ -301,18 +365,31 @@ func mapFrame(vu moduleVU, f api.Frame) mapping {
 			}
 			return rt.ToValue(mcfs).ToObject(rt)
 		},
-		"click": func(selector string, opts goja.Value) *goja.Promise {
+		"click": func(selector string, opts goja.Value) (*goja.Promise, error) {
+			popts, err := parseFrameClickOptions(vu.Context(), opts, f.Timeout())
+			if err != nil {
+				return nil, err
+			}
+
 			return k6ext.Promise(vu.Context(), func() (any, error) {
-				err := f.Click(selector, opts)
+				err := f.Click(selector, popts)
 				return nil, err //nolint:wrapcheck
-			})
+			}), nil
 		},
-		"content":       f.Content,
-		"dblclick":      f.Dblclick,
-		"dispatchEvent": f.DispatchEvent,
-		"evaluate":      f.Evaluate,
-		"evaluateHandle": func(pageFunction goja.Value, args ...goja.Value) (mapping, error) {
-			jsh, err := f.EvaluateHandle(pageFunction, args...)
+		"content":  f.Content,
+		"dblclick": f.Dblclick,
+		"dispatchEvent": func(selector, typ string, eventInit, opts goja.Value) error {
+			popts := common.NewFrameDispatchEventOptions(f.Timeout())
+			if err := popts.Parse(vu.Context(), opts); err != nil {
+				return fmt.Errorf("parsing frame dispatch event options: %w", err)
+			}
+			return f.DispatchEvent(selector, typ, exportArg(eventInit), popts) //nolint:wrapcheck
+		},
+		"evaluate": func(pageFunction goja.Value, gargs ...goja.Value) any {
+			return f.Evaluate(pageFunction.String(), exportArgs(gargs)...)
+		},
+		"evaluateHandle": func(pageFunction goja.Value, gargs ...goja.Value) (mapping, error) {
+			jsh, err := f.EvaluateHandle(pageFunction.String(), exportArgs(gargs)...)
 			if err != nil {
 				return nil, err //nolint:wrapcheck
 			}
@@ -328,15 +405,22 @@ func mapFrame(vu moduleVU, f api.Frame) mapping {
 			return mapElementHandle(vu, fe), nil
 		},
 		"getAttribute": f.GetAttribute,
-		"goto": func(url string, opts goja.Value) *goja.Promise {
+		"goto": func(url string, opts goja.Value) (*goja.Promise, error) {
+			gopts := common.NewFrameGotoOptions(
+				f.Referrer(),
+				f.NavigationTimeout(),
+			)
+			if err := gopts.Parse(vu.Context(), opts); err != nil {
+				return nil, fmt.Errorf("parsing frame navigation options to %q: %w", url, err)
+			}
 			return k6ext.Promise(vu.Context(), func() (any, error) {
-				resp, err := f.Goto(url, opts)
+				resp, err := f.Goto(url, gopts)
 				if err != nil {
 					return nil, err //nolint:wrapcheck
 				}
 
 				return mapResponse(vu, resp), nil
-			})
+			}), nil
 		},
 		"hover":      f.Hover,
 		"innerHTML":  f.InnerHTML,
@@ -372,20 +456,32 @@ func mapFrame(vu moduleVU, f api.Frame) mapping {
 		"type":          f.Type,
 		"uncheck":       f.Uncheck,
 		"url":           f.URL,
-		"waitForFunction": func(pageFunc, opts goja.Value, args ...goja.Value) *goja.Promise {
+		"waitForFunction": func(pageFunc, opts goja.Value, args ...goja.Value) (*goja.Promise, error) {
+			js, popts, pargs, err := parseWaitForFunctionArgs(
+				vu.Context(), f.Timeout(), pageFunc, opts, args...,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("frame waitForFunction: %w", err)
+			}
+
 			return k6ext.Promise(vu.Context(), func() (result any, reason error) {
-				return f.WaitForFunction(pageFunc, opts, args...) //nolint:wrapcheck
-			})
+				return f.WaitForFunction(js, popts, pargs...) //nolint:wrapcheck
+			}), nil
 		},
 		"waitForLoadState": f.WaitForLoadState,
-		"waitForNavigation": func(opts goja.Value) *goja.Promise {
+		"waitForNavigation": func(opts goja.Value) (*goja.Promise, error) {
+			popts := common.NewFrameWaitForNavigationOptions(f.Timeout())
+			if err := popts.Parse(vu.Context(), opts); err != nil {
+				return nil, fmt.Errorf("parsing frame wait for navigation options: %w", err)
+			}
+
 			return k6ext.Promise(vu.Context(), func() (result any, reason error) {
-				resp, err := f.WaitForNavigation(opts)
+				resp, err := f.WaitForNavigation(popts)
 				if err != nil {
 					return nil, err //nolint:wrapcheck
 				}
 				return mapResponse(vu, resp), nil
-			})
+			}), nil
 		},
 		"waitForSelector": func(selector string, opts goja.Value) (mapping, error) {
 			eh, err := f.WaitForSelector(selector, opts)
@@ -397,9 +493,15 @@ func mapFrame(vu moduleVU, f api.Frame) mapping {
 		"waitForTimeout": f.WaitForTimeout,
 	}
 	maps["$"] = func(selector string) (mapping, error) {
-		eh, err := f.Query(selector)
+		eh, err := f.Query(selector, common.StrictModeOff)
 		if err != nil {
 			return nil, err //nolint:wrapcheck
+		}
+		// ElementHandle can be null when the selector does not match any elements.
+		// We do not want to map nil elementHandles since the expectation is a
+		// null result in the test script for this case.
+		if eh == nil {
+			return nil, nil //nolint:nilnil
 		}
 		ehm := mapElementHandle(vu, eh)
 		return ehm, nil
@@ -420,10 +522,28 @@ func mapFrame(vu moduleVU, f api.Frame) mapping {
 	return maps
 }
 
+func parseWaitForFunctionArgs(
+	ctx context.Context, timeout time.Duration, pageFunc, opts goja.Value, gargs ...goja.Value,
+) (string, *common.FrameWaitForFunctionOptions, []any, error) {
+	popts := common.NewFrameWaitForFunctionOptions(timeout)
+	err := popts.Parse(ctx, opts)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("parsing waitForFunction options: %w", err)
+	}
+
+	js := pageFunc.ToString().String()
+	_, isCallable := goja.AssertFunction(pageFunc)
+	if !isCallable {
+		js = fmt.Sprintf("() => (%s)", js)
+	}
+
+	return js, popts, exportArgs(gargs), nil
+}
+
 // mapPage to the JS module.
 //
 //nolint:funlen
-func mapPage(vu moduleVU, p api.Page) mapping {
+func mapPage(vu moduleVU, p *common.Page) mapping {
 	rt := vu.Runtime()
 	maps := mapping{
 		"addInitScript": p.AddInitScript,
@@ -431,23 +551,40 @@ func mapPage(vu moduleVU, p api.Page) mapping {
 		"addStyleTag":   p.AddStyleTag,
 		"bringToFront":  p.BringToFront,
 		"check":         p.Check,
-		"click": func(selector string, opts goja.Value) *goja.Promise {
+		"click": func(selector string, opts goja.Value) (*goja.Promise, error) {
+			popts, err := parseFrameClickOptions(vu.Context(), opts, p.Timeout())
+			if err != nil {
+				return nil, err
+			}
+
 			return k6ext.Promise(vu.Context(), func() (any, error) {
-				err := p.Click(selector, opts)
+				err := p.Click(selector, popts)
 				return nil, err //nolint:wrapcheck
-			})
+			}), nil
 		},
-		"close":                   p.Close,
-		"content":                 p.Content,
-		"context":                 p.Context,
-		"dblclick":                p.Dblclick,
-		"dispatchEvent":           p.DispatchEvent,
+		"close": func(opts goja.Value) error {
+			vu.taskQueueRegistry.close(p.TargetID())
+
+			return p.Close(opts) //nolint:wrapcheck
+		},
+		"content":  p.Content,
+		"context":  p.Context,
+		"dblclick": p.Dblclick,
+		"dispatchEvent": func(selector, typ string, eventInit, opts goja.Value) error {
+			popts := common.NewFrameDispatchEventOptions(p.Timeout())
+			if err := popts.Parse(vu.Context(), opts); err != nil {
+				return fmt.Errorf("parsing page dispatch event options: %w", err)
+			}
+			return p.DispatchEvent(selector, typ, exportArg(eventInit), popts) //nolint:wrapcheck
+		},
 		"dragAndDrop":             p.DragAndDrop,
 		"emulateMedia":            p.EmulateMedia,
 		"emulateVisionDeficiency": p.EmulateVisionDeficiency,
-		"evaluate":                p.Evaluate,
-		"evaluateHandle": func(pageFunc goja.Value, args ...goja.Value) (mapping, error) {
-			jsh, err := p.EvaluateHandle(pageFunc, args...)
+		"evaluate": func(pageFunction goja.Value, gargs ...goja.Value) any {
+			return p.Evaluate(pageFunction.String(), exportArgs(gargs)...)
+		},
+		"evaluateHandle": func(pageFunc goja.Value, gargs ...goja.Value) (mapping, error) {
+			jsh, err := p.EvaluateHandle(pageFunc.String(), exportArgs(gargs)...)
 			if err != nil {
 				return nil, err //nolint:wrapcheck
 			}
@@ -476,15 +613,22 @@ func mapPage(vu moduleVU, p api.Page) mapping {
 			})
 		},
 		"goForward": p.GoForward,
-		"goto": func(url string, opts goja.Value) *goja.Promise {
+		"goto": func(url string, opts goja.Value) (*goja.Promise, error) {
+			gopts := common.NewFrameGotoOptions(
+				p.Referrer(),
+				p.NavigationTimeout(),
+			)
+			if err := gopts.Parse(vu.Context(), opts); err != nil {
+				return nil, fmt.Errorf("parsing page navigation options to %q: %w", url, err)
+			}
 			return k6ext.Promise(vu.Context(), func() (any, error) {
-				resp, err := p.Goto(url, opts)
+				resp, err := p.Goto(url, gopts)
 				if err != nil {
 					return nil, err //nolint:wrapcheck
 				}
 
 				return mapResponse(vu, resp), nil
-			})
+			}), nil
 		},
 		"hover":      p.Hover,
 		"innerHTML":  p.InnerHTML,
@@ -508,12 +652,23 @@ func mapPage(vu moduleVU, p api.Page) mapping {
 		},
 		"mouse": rt.ToValue(p.GetMouse()).ToObject(rt),
 		"on": func(event string, handler goja.Callable) error {
-			mapMsgAndHandleEvent := func(m *api.ConsoleMessage) error {
+			tq := vu.taskQueueRegistry.get(p.TargetID())
+
+			mapMsgAndHandleEvent := func(m *common.ConsoleMessage) error {
 				mapping := mapConsoleMessage(vu, m)
 				_, err := handler(goja.Undefined(), vu.Runtime().ToValue(mapping))
 				return err
 			}
-			return p.On(event, mapMsgAndHandleEvent) //nolint:wrapcheck
+			runInTaskQueue := func(m *common.ConsoleMessage) {
+				tq.Queue(func() error {
+					if err := mapMsgAndHandleEvent(m); err != nil {
+						return fmt.Errorf("executing page.on handler: %w", err)
+					}
+					return nil
+				})
+			}
+
+			return p.On(event, runInTaskQueue) //nolint:wrapcheck
 		},
 		"opener": p.Opener,
 		"pause":  p.Pause,
@@ -523,8 +678,24 @@ func mapPage(vu moduleVU, p api.Page) mapping {
 			r := mapResponse(vu, p.Reload(opts))
 			return rt.ToValue(r).ToObject(rt)
 		},
-		"route":                       p.Route,
-		"screenshot":                  p.Screenshot,
+		"route": p.Route,
+		"screenshot": func(opts goja.Value) (*goja.ArrayBuffer, error) {
+			ctx := vu.Context()
+
+			popts := common.NewPageScreenshotOptions()
+			if err := popts.Parse(ctx, opts); err != nil {
+				return nil, fmt.Errorf("parsing page screenshot options: %w", err)
+			}
+
+			bb, err := p.Screenshot(popts, vu.filePersister)
+			if err != nil {
+				return nil, err //nolint:wrapcheck
+			}
+
+			ab := rt.NewArrayBuffer(bb)
+
+			return &ab, nil
+		},
 		"selectOption":                p.SelectOption,
 		"setContent":                  p.SetContent,
 		"setDefaultNavigationTimeout": p.SetDefaultNavigationTimeout,
@@ -534,6 +705,8 @@ func mapPage(vu moduleVU, p api.Page) mapping {
 		"setViewportSize":             p.SetViewportSize,
 		"tap":                         p.Tap,
 		"textContent":                 p.TextContent,
+		"throttleCPU":                 p.ThrottleCPU,
+		"throttleNetwork":             p.ThrottleNetwork,
 		"title":                       p.Title,
 		"touchscreen":                 rt.ToValue(p.GetTouchscreen()).ToObject(rt),
 		"type":                        p.Type,
@@ -543,20 +716,32 @@ func mapPage(vu moduleVU, p api.Page) mapping {
 		"video":                       p.Video,
 		"viewportSize":                p.ViewportSize,
 		"waitForEvent":                p.WaitForEvent,
-		"waitForFunction": func(pageFunc, opts goja.Value, args ...goja.Value) *goja.Promise {
+		"waitForFunction": func(pageFunc, opts goja.Value, args ...goja.Value) (*goja.Promise, error) {
+			js, popts, pargs, err := parseWaitForFunctionArgs(
+				vu.Context(), p.Timeout(), pageFunc, opts, args...,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("page waitForFunction: %w", err)
+			}
+
 			return k6ext.Promise(vu.Context(), func() (result any, reason error) {
-				return p.WaitForFunction(pageFunc, opts, args...) //nolint:wrapcheck
-			})
+				return p.WaitForFunction(js, popts, pargs...) //nolint:wrapcheck
+			}), nil
 		},
 		"waitForLoadState": p.WaitForLoadState,
-		"waitForNavigation": func(opts goja.Value) *goja.Promise {
+		"waitForNavigation": func(opts goja.Value) (*goja.Promise, error) {
+			popts := common.NewFrameWaitForNavigationOptions(p.Timeout())
+			if err := popts.Parse(vu.Context(), opts); err != nil {
+				return nil, fmt.Errorf("parsing page wait for navigation options: %w", err)
+			}
+
 			return k6ext.Promise(vu.Context(), func() (result any, reason error) {
-				resp, err := p.WaitForNavigation(opts)
+				resp, err := p.WaitForNavigation(popts)
 				if err != nil {
 					return nil, err //nolint:wrapcheck
 				}
 				return mapResponse(vu, resp), nil
-			})
+			}), nil
 		},
 		"waitForRequest":  p.WaitForRequest,
 		"waitForResponse": p.WaitForResponse,
@@ -582,6 +767,12 @@ func mapPage(vu moduleVU, p api.Page) mapping {
 		if err != nil {
 			return nil, err //nolint:wrapcheck
 		}
+		// ElementHandle can be null when the selector does not match any elements.
+		// We do not want to map nil elementHandles since the expectation is a
+		// null result in the test script for this case.
+		if eh == nil {
+			return nil, nil //nolint:nilnil
+		}
 		ehm := mapElementHandle(vu, eh)
 		return ehm, nil
 	}
@@ -602,7 +793,7 @@ func mapPage(vu moduleVU, p api.Page) mapping {
 }
 
 // mapWorker to the JS module.
-func mapWorker(vu moduleVU, w api.Worker) mapping {
+func mapWorker(vu moduleVU, w *common.Worker) mapping {
 	return mapping{
 		"evaluate": w.Evaluate,
 		"evaluateHandle": func(pageFunc goja.Value, args ...goja.Value) (mapping, error) {
@@ -618,19 +809,50 @@ func mapWorker(vu moduleVU, w api.Worker) mapping {
 }
 
 // mapBrowserContext to the JS module.
-func mapBrowserContext(vu moduleVU, bc api.BrowserContext) mapping {
+func mapBrowserContext(vu moduleVU, bc *common.BrowserContext) mapping { //nolint:funlen
 	rt := vu.Runtime()
 	return mapping{
-		"addCookies":                  bc.AddCookies,
-		"addInitScript":               bc.AddInitScript,
-		"browser":                     bc.Browser,
-		"clearCookies":                bc.ClearCookies,
-		"clearPermissions":            bc.ClearPermissions,
-		"close":                       bc.Close,
-		"cookies":                     bc.Cookies,
-		"exposeBinding":               bc.ExposeBinding,
-		"exposeFunction":              bc.ExposeFunction,
-		"grantPermissions":            bc.GrantPermissions,
+		"addCookies": bc.AddCookies,
+		"addInitScript": func(script goja.Value) error {
+			if !gojaValueExists(script) {
+				return nil
+			}
+
+			source := ""
+			switch script.ExportType() {
+			case reflect.TypeOf(string("")):
+				source = script.String()
+			case reflect.TypeOf(goja.Object{}):
+				opts := script.ToObject(rt)
+				for _, k := range opts.Keys() {
+					if k == "content" {
+						source = opts.Get(k).String()
+					}
+				}
+			default:
+				_, isCallable := goja.AssertFunction(script)
+				if !isCallable {
+					source = fmt.Sprintf("(%s);", script.ToString().String())
+				} else {
+					source = fmt.Sprintf("(%s)(...args);", script.ToString().String())
+				}
+			}
+
+			return bc.AddInitScript(source) //nolint:wrapcheck
+		},
+		"browser":          bc.Browser,
+		"clearCookies":     bc.ClearCookies,
+		"clearPermissions": bc.ClearPermissions,
+		"close":            bc.Close,
+		"cookies":          bc.Cookies,
+		"exposeBinding":    bc.ExposeBinding,
+		"exposeFunction":   bc.ExposeFunction,
+		"grantPermissions": func(permissions []string, opts goja.Value) error {
+			pOpts := common.NewGrantPermissionsOptions()
+			pOpts.Parse(vu.Context(), opts)
+
+			return bc.GrantPermissions(permissions, pOpts) //nolint:wrapcheck
+		},
 		"newCDPSession":               bc.NewCDPSession,
 		"route":                       bc.Route,
 		"setDefaultNavigationTimeout": bc.SetDefaultNavigationTimeout,
@@ -648,7 +870,53 @@ func mapBrowserContext(vu moduleVU, bc api.BrowserContext) mapping {
 		"setOffline":         bc.SetOffline,
 		"storageState":       bc.StorageState,
 		"unroute":            bc.Unroute,
-		"waitForEvent":       bc.WaitForEvent,
+		"waitForEvent": func(event string, optsOrPredicate goja.Value) (*goja.Promise, error) {
+			ctx := vu.Context()
+			popts := common.NewWaitForEventOptions(
+				bc.Timeout(),
+			)
+			if err := popts.Parse(ctx, optsOrPredicate); err != nil {
+				return nil, fmt.Errorf("parsing waitForEvent options: %w", err)
+			}
+
+			return k6ext.Promise(ctx, func() (result any, reason error) {
+				var runInTaskQueue func(p *common.Page) (bool, error)
+				if popts.PredicateFn != nil {
+					runInTaskQueue = func(p *common.Page) (bool, error) {
+						tq := vu.taskQueueRegistry.get(p.TargetID())
+
+						var rtn bool
+						var err error
+						// The function on the taskqueue runs in its own goroutine
+						// so we need to use a channel to wait for it to complete
+						// before returning the result to the caller.
+						c := make(chan bool)
+						tq.Queue(func() error {
+							var resp goja.Value
+							resp, err = popts.PredicateFn(vu.Runtime().ToValue(p))
+							rtn = resp.ToBoolean()
+							close(c)
+							return nil
+						})
+						<-c
+
+						return rtn, err //nolint:wrapcheck
+					}
+				}
+
+				resp, err := bc.WaitForEvent(event, runInTaskQueue, popts.Timeout)
+				panicIfFatalError(ctx, err)
+				if err != nil {
+					return nil, err //nolint:wrapcheck
+				}
+				p, ok := resp.(*common.Page)
+				if !ok {
+					panicIfFatalError(ctx, fmt.Errorf("response object is not a page: %w", k6error.ErrFatal))
+				}
+
+				return mapPage(vu, p), nil
+			}), nil
+		},
 		"pages": func() *goja.Object {
 			var (
 				mpages []mapping
@@ -675,7 +943,7 @@ func mapBrowserContext(vu moduleVU, bc api.BrowserContext) mapping {
 }
 
 // mapConsoleMessage to the JS module.
-func mapConsoleMessage(vu moduleVU, cm *api.ConsoleMessage) mapping {
+func mapConsoleMessage(vu moduleVU, cm *common.ConsoleMessage) mapping {
 	rt := vu.Runtime()
 	return mapping{
 		"args": func() *goja.Object {
@@ -706,15 +974,22 @@ func mapConsoleMessage(vu moduleVU, cm *api.ConsoleMessage) mapping {
 }
 
 // mapBrowser to the JS module.
-func mapBrowser(vu moduleVU) mapping {
+func mapBrowser(vu moduleVU) mapping { //nolint:funlen
 	rt := vu.Runtime()
 	return mapping{
-		"context": func() (api.BrowserContext, error) {
+		"context": func() (*common.BrowserContext, error) {
 			b, err := vu.browser()
 			if err != nil {
 				return nil, err
 			}
 			return b.Context(), nil
+		},
+		"closeContext": func() error {
+			b, err := vu.browser()
+			if err != nil {
+				return err
+			}
+			return b.CloseContext() //nolint:wrapcheck
 		},
 		"isConnected": func() (bool, error) {
 			b, err := vu.browser()
@@ -732,6 +1007,11 @@ func mapBrowser(vu moduleVU) mapping {
 			if err != nil {
 				return nil, err //nolint:wrapcheck
 			}
+
+			if err := initBrowserContext(bctx, vu.testRunID); err != nil {
+				return nil, err
+			}
+
 			m := mapBrowserContext(vu, bctx)
 			return rt.ToValue(m).ToObject(rt), nil
 		},
@@ -758,13 +1038,26 @@ func mapBrowser(vu moduleVU) mapping {
 			if err != nil {
 				return nil, err //nolint:wrapcheck
 			}
+
+			if err := initBrowserContext(b.Context(), vu.testRunID); err != nil {
+				return nil, err
+			}
+
 			return mapPage(vu, page), nil
 		},
 	}
 }
 
-func panicIfFatalError(ctx context.Context, err error) {
-	if errors.Is(err, k6error.ErrFatal) {
-		k6ext.Abort(ctx, err.Error())
+func initBrowserContext(bctx *common.BrowserContext, testRunID string) error {
+	// Setting a k6 object which will contain k6 specific metadata
+	// on the current test run. This allows external applications
+	// (such as Grafana Faro) to identify that the session is a k6
+	// automated one and not one driven by a real person.
+	if err := bctx.AddInitScript(
+		fmt.Sprintf(`window.k6 = { testRunId: %q }`, testRunID),
+	); err != nil {
+		return fmt.Errorf("adding k6 object to new browser context: %w", err)
 	}
+
+	return nil
 }

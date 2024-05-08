@@ -9,23 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"google.golang.org/grpc/reflection"
-	"google.golang.org/protobuf/reflect/protoreflect"
-	"google.golang.org/protobuf/reflect/protoregistry"
-	"google.golang.org/protobuf/types/known/wrapperspb"
-	"gopkg.in/guregu/null.v3"
-
-	"github.com/golang/protobuf/ptypes/any"
-	"github.com/golang/protobuf/ptypes/wrappers"
-	"github.com/sirupsen/logrus"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
-	grpcstats "google.golang.org/grpc/stats"
-	"google.golang.org/grpc/status"
-
 	k6grpc "go.k6.io/k6/js/modules/k6/grpc"
 	"go.k6.io/k6/lib/netext/grpcext"
 	"go.k6.io/k6/lib/testutils/httpmultibin"
@@ -33,6 +16,24 @@ import (
 	"go.k6.io/k6/lib/testutils/httpmultibin/grpc_testing"
 	"go.k6.io/k6/lib/testutils/httpmultibin/grpc_wrappers_testing"
 	"go.k6.io/k6/metrics"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+
+	"github.com/golang/protobuf/ptypes/any"
+	_struct "github.com/golang/protobuf/ptypes/struct"
+	"github.com/golang/protobuf/ptypes/wrappers"
+	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
+	"google.golang.org/grpc/metadata"
+	v1alphagrpc "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
+	grpcstats "google.golang.org/grpc/stats"
+	"gopkg.in/guregu/null.v3"
 )
 
 func TestClient(t *testing.T) {
@@ -639,7 +640,51 @@ func TestClient(t *testing.T) {
 		{
 			name: "ReflectInvoke",
 			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				// this register both reflection APIs v1 and v1alpha
 				reflection.Register(tb.ServerGRPC)
+
+				tb.GRPCStub.EmptyCallFunc = func(ctx context.Context, _ *grpc_testing.Empty) (*grpc_testing.Empty, error) {
+					return &grpc_testing.Empty{}, nil
+				}
+			},
+			initString: codeBlock{
+				code: `var client = new grpc.Client();`,
+			},
+			vuString: codeBlock{
+				code: `
+					client.connect("GRPCBIN_ADDR", {reflect: true})
+					client.invoke("grpc.testing.TestService/EmptyCall", {})
+				`,
+			},
+		},
+		{
+			name: "ReflectV1Alpha_Invoke",
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				// this register only v1alpha (this could be removed with removal v1alpha from grpc-go)
+				s := tb.ServerGRPC
+				svr := reflection.NewServer(reflection.ServerOptions{Services: s})
+				v1alphagrpc.RegisterServerReflectionServer(s, svr)
+
+				tb.GRPCStub.EmptyCallFunc = func(ctx context.Context, _ *grpc_testing.Empty) (*grpc_testing.Empty, error) {
+					return &grpc_testing.Empty{}, nil
+				}
+			},
+			initString: codeBlock{
+				code: `var client = new grpc.Client();`,
+			},
+			vuString: codeBlock{
+				code: `
+					client.connect("GRPCBIN_ADDR", {reflect: true})
+					client.invoke("grpc.testing.TestService/EmptyCall", {})
+				`,
+			},
+		},
+		{
+			name: "ReflectV1Invoke",
+			setup: func(tb *httpmultibin.HTTPMultiBin) {
+				// this register only reflection APIs v1
+				reflection.RegisterV1(tb.ServerGRPC)
+
 				tb.GRPCStub.EmptyCallFunc = func(ctx context.Context, _ *grpc_testing.Empty) (*grpc_testing.Empty, error) {
 					return &grpc_testing.Empty{}, nil
 				}
@@ -853,6 +898,63 @@ func TestClient(t *testing.T) {
 			`,
 			},
 		},
+		{
+			name: "ValueReflection",
+			setup: func(hb *httpmultibin.HTTPMultiBin) {
+				reflection.Register(hb.ServerGRPC)
+
+				srv := grpc_wrappers_testing.Register(hb.ServerGRPC)
+
+				srv.TestValueImplementation = func(_ context.Context, in *_struct.Value) (*_struct.Value, error) {
+					if in.GetNumberValue() == 12 {
+						return &_struct.Value{
+							Kind: &_struct.Value_NumberValue{
+								NumberValue: 42,
+							},
+						}, nil
+					}
+
+					if in.GetStringValue() != "" {
+						return &_struct.Value{
+							Kind: &_struct.Value_StringValue{
+								StringValue: "hey " + in.GetStringValue(),
+							},
+						}, nil
+					}
+
+					return &_struct.Value{
+						Kind: &_struct.Value_StringValue{
+							StringValue: "I don't know what to answer",
+						},
+					}, nil
+				}
+			},
+			initString: codeBlock{
+				code: `
+				const client = new grpc.Client();
+				`,
+			},
+			vuString: codeBlock{
+				code: `
+				client.connect("GRPCBIN_ADDR", {reflect: true});
+
+				let respString = client.invoke("grpc.wrappers.testing.Service/TestValue", "John")
+				if (respString.message !== "hey John") {
+					throw new Error("expected to get 'hey John', but got a " + respString.message)
+				}
+
+				let respNumber = client.invoke("grpc.wrappers.testing.Service/TestValue", 12)
+				if (respNumber.message !== 42) {
+					throw new Error("expected to get '42', but got a " + respNumber.message)
+				}
+
+				let respBool = client.invoke("grpc.wrappers.testing.Service/TestValue", false)
+				if (respBool.message !== "I don't know what to answer") {
+					throw new Error("expected to get 'I don't know what to answer', but got a " + respBool.message)
+				}
+			`,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -871,7 +973,6 @@ func TestClient(t *testing.T) {
 			assertResponse(t, tt.initString, err, val, ts)
 
 			ts.ToVUContext()
-
 			val, err = ts.Run(tt.vuString.code)
 			assertResponse(t, tt.vuString, err, val, ts)
 		})
@@ -891,9 +992,9 @@ func TestClient_TlsParameters(t *testing.T) {
 	clientAuth := "-----BEGIN CERTIFICATE-----\\nMIIBVzCB/6ADAgECAgkAg/SeNG3XqB0wCgYIKoZIzj0EAwIwEDEOMAwGA1UEAwwF\\nTXkgQ0EwIBcNMjIwMTIxMTUxMjM0WhgPMzAyMTA1MjQxNTEyMzRaMBExDzANBgNV\\nBAMMBmNsaWVudDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABKM7OJQMYG4KLtDA\\ngZ8zOg2PimHMmQnjD2HtI4cSwIUJJnvHWLowbFe9fk6XeP9b3dK1ImUI++/EZdVr\\nABAcngejPzA9MA4GA1UdDwEB/wQEAwIBBjAMBgNVHRMBAf8EAjAAMB0GA1UdDgQW\\nBBSttJe1mcPEnBOZ6wvKPG4zL0m1CzAKBggqhkjOPQQDAgNHADBEAiBPSLgKA/r9\\nu/FW6W+oy6Odm1kdNMGCI472iTn545GwJgIgb3UQPOUTOj0IN4JLJYfmYyXviqsy\\nzk9eWNHFXDA9U6U=\\n-----END CERTIFICATE-----"
 	clientAuthKey := testingKey("-----BEGIN EC TESTING KEY-----\\nMHcCAQEEINDaMGkOT3thu1A0LfLJr3Jd011/aEG6OArmEQaujwgpoAoGCCqGSM49\\nAwEHoUQDQgAEozs4lAxgbgou0MCBnzM6DY+KYcyZCeMPYe0jhxLAhQkme8dYujBs\\nV71+Tpd4/1vd0rUiZQj778Rl1WsAEByeBw==\\n-----END EC TESTING KEY-----")
 	clientAuthKeyEncrypted := testingKey("-----BEGIN EC TESTING KEY-----\\nProc-Type: 4,ENCRYPTED\\nDEK-Info: AES-256-CBC,3E311E9B602231BFB5C752071EE7D652\\n\\nsAKeqbacug0v4ruE1A0CACwGVEGBQVOl1CiGVp5RsxgNZKXzMS6EsTTNLw378coF\\nKXbF+he05HIuzToOz2ANLXov1iCrVpotKVB4l2obTQvg+5VET902ky99Mc9Us7jd\\nUwW8LpXlSlhcNWuUfK6wyosL42TbcIxjqZWaESW+6ww=\\n-----END EC TESTING KEY-----")
-	clientAuthBad := "-----BEGIN CERTIFICATE-----\\nMIIB2TCCAX6gAwIBAgIUJIZKiR78AH2ioZ+Jae/sElgH85kwCgYIKoZIzj0EAwIw\\nEDEOMAwGA1UEAwwFTXkgQ0EwHhcNMjMwNzA3MTAyNjQ2WhcNMjQwNzA2MTAyNjQ2\\nWjARMQ8wDQYDVQQDDAZjbGllbnQwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASj\\nOziUDGBuCi7QwIGfMzoNj4phzJkJ4w9h7SOHEsCFCSZ7x1i6MGxXvX5Ol3j/W93S\\ntSJlCPvvxGXVawAQHJ4Ho4G0MIGxMAkGA1UdEwQCMAAwEQYJYIZIAYb4QgEBBAQD\\nAgWgMCwGCWCGSAGG+EIBDQQfFh1Mb2NhbCBUZXN0IENsaWVudCBDZXJ0aWZpY2F0\\nZTAdBgNVHQ4EFgQUrbSXtZnDxJwTmesLyjxuMy9JtQswHwYDVR0jBBgwFoAUpLpA\\nQPJYBb7wSQGCrKElEfj1+9YwDgYDVR0PAQH/BAQDAgXgMBMGA1UdJQQMMAoGCCsG\\nAQUFBwMEMAoGCCqGSM49BAMCA0kAMEYCIQDcHrzug3V3WvUU+tEKhG1C4cPG5rPJ\\n/y3oOoM0roOnsgIhAP23UmiC6Qdgj+MOhXWSaNt3exWvlxdKmLm2edkxaTs+\\n-----END CERTIFICATE-----"
 
 	trivialKeyPassword := "abc123"
+	trivialWrongKeyPassword := "abc321"
 
 	tests := []testcase{
 		{
@@ -944,7 +1045,7 @@ func TestClient_TlsParameters(t *testing.T) {
 				tb.ServerHTTP2.TLS.ClientCAs = clientCAPool
 			},
 			initString: codeBlock{code: "var client = new grpc.Client();"},
-			vuString:   codeBlock{code: fmt.Sprintf(`client.connect("GRPCBIN_ADDR", { tls: { cacerts: "%s", cert: "%s", key: "%s" }});`, localHostCert, clientAuth, clientAuthKey)},
+			vuString:   codeBlock{code: fmt.Sprintf(`client.connect("GRPCBIN_ADDR", { tls: { cacerts: ["%s"], cert: "%s", key: "%s" }});`, localHostCert, clientAuth, clientAuthKey)},
 		},
 		{
 			name: "ConnectTlsEncryptedKey",
@@ -961,48 +1062,12 @@ func TestClient_TlsParameters(t *testing.T) {
 			name:       "ConnectTlsEncryptedKeyDecryptionFailed",
 			initString: codeBlock{code: "var client = new grpc.Client();"},
 			vuString: codeBlock{
-				code: fmt.Sprintf(`client.connect("GRPCBIN_ADDR", { timeout: '5s', tls: { cert: "%s", key: "%s", password: "abc321" }});`,
+				code: fmt.Sprintf(`client.connect("GRPCBIN_ADDR", { timeout: '5s', tls: { cert: "%s", key: "%s", password: "%s" }});`,
 					clientAuth,
 					clientAuthKeyEncrypted,
+					trivialWrongKeyPassword,
 				),
 				err: "x509: decryption password incorrect",
-			},
-		},
-		{
-			name: "ConnectTlsClientCertNoClientAuth",
-			setup: func(tb *httpmultibin.HTTPMultiBin) {
-				clientCAPool := x509.NewCertPool()
-				clientCAPool.AppendCertsFromPEM(clientAuthCA)
-				tb.ServerHTTP2.TLS.ClientAuth = tls.RequireAndVerifyClientCert
-				tb.ServerHTTP2.TLS.ClientCAs = clientCAPool
-			},
-			initString: codeBlock{code: `var client = new grpc.Client();`},
-			vuString: codeBlock{
-				code: fmt.Sprintf(`client.connect("GRPCBIN_ADDR", { tls: { cacerts: ["%s"], cert: "%s", key: "%s" }});`,
-					localHostCert,
-					clientAuthBad,
-					clientAuthKey),
-				err: "remote error: tls: bad certificate",
-			},
-		},
-		{
-			name: "ConnectTlsClientCertWithPasswordNoClientAuth",
-			setup: func(tb *httpmultibin.HTTPMultiBin) {
-				clientCAPool := x509.NewCertPool()
-				clientCAPool.AppendCertsFromPEM(clientAuthCA)
-				tb.ServerHTTP2.TLS.ClientAuth = tls.RequireAndVerifyClientCert
-				tb.ServerHTTP2.TLS.ClientCAs = clientCAPool
-			},
-			initString: codeBlock{code: `var client = new grpc.Client();`},
-			vuString: codeBlock{
-				code: fmt.Sprintf(`
-				client.connect("GRPCBIN_ADDR", { tls: { cacerts: ["%s"], cert: "%s", key: "%s", password: "%s" }});
-				`,
-					localHostCert,
-					clientAuthBad,
-					clientAuthKeyEncrypted,
-					trivialKeyPassword),
-				err: "remote error: tls: bad certificate",
 			},
 		},
 		{
@@ -1049,7 +1114,6 @@ func TestClient_TlsParameters(t *testing.T) {
 			assertResponse(t, tt.initString, err, val, ts)
 
 			ts.ToVUContext()
-
 			val, err = ts.Run(tt.vuString.code)
 			assertResponse(t, tt.vuString, err, val, ts)
 		})
@@ -1129,62 +1193,30 @@ func TestDebugStat(t *testing.T) {
 	}
 }
 
-func TestClientInvokeHeadersDeprecated(t *testing.T) {
-	t.Parallel()
-
-	ts := newTestState(t)
-	reflection.Register(ts.httpBin.ServerGRPC)
-
-	ts.httpBin.GRPCStub.EmptyCallFunc = func(_ context.Context, _ *grpc_testing.Empty) (*grpc_testing.Empty, error) {
-		return &grpc_testing.Empty{}, nil
-	}
-
-	initString := codeBlock{
-		code: `var client = new grpc.Client();`,
-	}
-	vuString := codeBlock{
-		code: `
-		client.connect("GRPCBIN_ADDR", {reflect:true});
-		var resp = client.invoke("grpc.testing.TestService/EmptyCall", {}, { headers: { "X-Load-Tester": "k6" } })
-		if (resp.status !== grpc.StatusOK) {
-			throw new Error("failed to send a request")
-		}
-		`,
-	}
-
-	val, err := ts.Run(initString.code)
-	assertResponse(t, initString, err, val, ts)
-
-	ts.ToVUContext()
-
-	val, err = ts.Run(vuString.code)
-	assertResponse(t, vuString, err, val, ts)
-
-	entries := ts.loggerHook.Drain()
-
-	require.Len(t, entries, 1)
-	require.Contains(t, entries[0].Message, "headers property is deprecated")
-}
-
 func TestClientLoadProto(t *testing.T) {
 	t.Parallel()
 
 	ts := newTestState(t)
 
-	code := `
-		var client = new grpc.Client();
-		client.load([], "../../../../lib/testutils/httpmultibin/grpc_testing/nested_types.proto");`
+	tt := testcase{
+		name: "LoadNestedTypesProto",
+		initString: codeBlock{
+			code: `
+			var client = new grpc.Client();
+			client.load([], "../../../../lib/testutils/httpmultibin/nested_types/nested_types.proto");`,
+		},
+	}
 
-	_, err := ts.VU.Runtime().RunString(ts.httpBin.Replacer.Replace(code))
-	assert.Nil(t, err, "It was not expected that there would be an error, but it got: %v", err)
+	val, err := ts.Run(tt.initString.code)
+	assertResponse(t, tt.initString, err, val, ts)
 
 	expectedTypes := []string{
-		"grpc.testing.Outer",
-		"grpc.testing.Outer.MiddleAA",
-		"grpc.testing.Outer.MiddleAA.Inner",
-		"grpc.testing.Outer.MiddleBB",
-		"grpc.testing.Outer.MiddleBB.Inner",
-		"grpc.testing.MeldOuter",
+		"grpc.testdata.nested.types.Outer",
+		"grpc.testdata.nested.types.Outer.MiddleAA",
+		"grpc.testdata.nested.types.Outer.MiddleAA.Inner",
+		"grpc.testdata.nested.types.Outer.MiddleBB",
+		"grpc.testdata.nested.types.Outer.MiddleBB.Inner",
+		"grpc.testdata.nested.types.MeldOuter",
 	}
 
 	for _, expected := range expectedTypes {

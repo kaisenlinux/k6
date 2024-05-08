@@ -1,12 +1,11 @@
+// Package log provides logging for the browser module.
 package log
 
 import (
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"regexp"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 
@@ -25,7 +24,7 @@ type Logger struct {
 // be discarded and not logged anywhere.
 func NewNullLogger() *Logger {
 	log := logrus.New()
-	log.SetOutput(ioutil.Discard)
+	log.SetOutput(io.Discard)
 	return New(log, "")
 }
 
@@ -152,19 +151,6 @@ func (l *Logger) ReportCaller() {
 	l.SetReportCaller(true)
 }
 
-// ConsoleLogFormatterSerializer creates a new logger that will
-// correctly serialize RemoteObject instances.
-func (l *Logger) ConsoleLogFormatterSerializer() *Logger {
-	return &Logger{
-		Logger: &logrus.Logger{
-			Out:       l.Out,
-			Level:     l.Level,
-			Formatter: &consoleLogFormatter{l.Formatter},
-			Hooks:     l.Hooks,
-		},
-	}
-}
-
 // SetCategoryFilter enables filtering logs by the filter regex.
 func (l *Logger) SetCategoryFilter(filter string) (err error) {
 	if filter == "" {
@@ -174,25 +160,4 @@ func (l *Logger) SetCategoryFilter(filter string) (err error) {
 		return fmt.Errorf("invalid category filter %q: %w", filter, err)
 	}
 	return nil
-}
-
-type consoleLogFormatter struct {
-	logrus.Formatter
-}
-
-// Format assembles a message from marshalling elements in the "objects" field
-// to JSON separated by space, and deletes the field when done.
-func (f *consoleLogFormatter) Format(entry *logrus.Entry) ([]byte, error) {
-	if objects, ok := entry.Data["objects"].([]any); ok {
-		var msg []string
-		for _, obj := range objects {
-			// TODO: Log error?
-			if o, err := json.Marshal(obj); err == nil {
-				msg = append(msg, string(o))
-			}
-		}
-		entry.Message = strings.Join(msg, " ")
-		delete(entry.Data, "objects")
-	}
-	return f.Formatter.Format(entry)
 }

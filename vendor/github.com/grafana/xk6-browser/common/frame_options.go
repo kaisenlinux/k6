@@ -1,7 +1,9 @@
 package common
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"time"
@@ -76,11 +78,11 @@ type FrameIsEnabledOptions struct {
 }
 
 type FrameIsHiddenOptions struct {
-	FrameBaseOptions
+	Strict bool `json:"strict"`
 }
 
 type FrameIsVisibleOptions struct {
-	FrameBaseOptions
+	Strict bool `json:"strict"`
 }
 
 type FramePressOptions struct {
@@ -96,6 +98,12 @@ type FrameSelectOptionOptions struct {
 type FrameSetContentOptions struct {
 	Timeout   time.Duration  `json:"timeout"`
 	WaitUntil LifecycleEvent `json:"waitUntil" js:"waitUntil"`
+}
+
+// FrameSetInputFilesOptions are options for Frame.setInputFiles.
+type FrameSetInputFilesOptions struct {
+	ElementHandleSetInputFilesOptions
+	Strict bool `json:"strict"`
 }
 
 type FrameTapOptions struct {
@@ -116,6 +124,56 @@ type FrameTypeOptions struct {
 type FrameUncheckOptions struct {
 	ElementHandleBasePointerOptions
 	Strict bool `json:"strict"`
+}
+
+// PollingType is the type of polling to use.
+type PollingType int
+
+const (
+	// PollingRaf is the requestAnimationFrame polling type.
+	PollingRaf PollingType = iota
+
+	// PollingMutation is the mutation polling type.
+	PollingMutation
+
+	// PollingInterval is the interval polling type.
+	PollingInterval
+)
+
+func (p PollingType) String() string {
+	return pollingTypeToString[p]
+}
+
+var pollingTypeToString = map[PollingType]string{ //nolint:gochecknoglobals
+	PollingRaf:      "raf",
+	PollingMutation: "mutation",
+	PollingInterval: "interval",
+}
+
+var pollingTypeToID = map[string]PollingType{ //nolint:gochecknoglobals
+	"raf":      PollingRaf,
+	"mutation": PollingMutation,
+	"interval": PollingInterval,
+}
+
+// MarshalJSON marshals the enum as a quoted JSON string.
+func (p PollingType) MarshalJSON() ([]byte, error) {
+	buffer := bytes.NewBufferString(`"`)
+	buffer.WriteString(pollingTypeToString[p])
+	buffer.WriteString(`"`)
+	return buffer.Bytes(), nil
+}
+
+// UnmarshalJSON unmarshals a quoted JSON string to the enum value.
+func (p *PollingType) UnmarshalJSON(b []byte) error {
+	var j string
+	err := json.Unmarshal(b, &j)
+	if err != nil {
+		return fmt.Errorf("unmarshaling polling type: %w", err)
+	}
+	// Note that if the string cannot be found then it will be set to the zero value.
+	*p = pollingTypeToID[j]
+	return nil
 }
 
 type FrameWaitForFunctionOptions struct {
@@ -171,19 +229,10 @@ func NewFrameCheckOptions(defaultTimeout time.Duration) *FrameCheckOptions {
 }
 
 func (o *FrameCheckOptions) Parse(ctx context.Context, opts goja.Value) error {
-	rt := k6ext.Runtime(ctx)
 	if err := o.ElementHandleBasePointerOptions.Parse(ctx, opts); err != nil {
 		return err
 	}
-	if opts != nil && !goja.IsUndefined(opts) && !goja.IsNull(opts) {
-		opts := opts.ToObject(rt)
-		for _, k := range opts.Keys() {
-			switch k {
-			case "strict":
-				o.Strict = opts.Get(k).ToBoolean()
-			}
-		}
-	}
+	o.Strict = parseStrict(ctx, opts)
 	return nil
 }
 
@@ -195,19 +244,10 @@ func NewFrameClickOptions(defaultTimeout time.Duration) *FrameClickOptions {
 }
 
 func (o *FrameClickOptions) Parse(ctx context.Context, opts goja.Value) error {
-	rt := k6ext.Runtime(ctx)
 	if err := o.ElementHandleClickOptions.Parse(ctx, opts); err != nil {
 		return err
 	}
-	if opts != nil && !goja.IsUndefined(opts) && !goja.IsNull(opts) {
-		opts := opts.ToObject(rt)
-		for _, k := range opts.Keys() {
-			switch k {
-			case "strict":
-				o.Strict = opts.Get(k).ToBoolean()
-			}
-		}
-	}
+	o.Strict = parseStrict(ctx, opts)
 	return nil
 }
 
@@ -219,19 +259,10 @@ func NewFrameDblClickOptions(defaultTimeout time.Duration) *FrameDblclickOptions
 }
 
 func (o *FrameDblclickOptions) Parse(ctx context.Context, opts goja.Value) error {
-	rt := k6ext.Runtime(ctx)
 	if err := o.ElementHandleDblclickOptions.Parse(ctx, opts); err != nil {
 		return err
 	}
-	if opts != nil && !goja.IsUndefined(opts) && !goja.IsNull(opts) {
-		opts := opts.ToObject(rt)
-		for _, k := range opts.Keys() {
-			switch k {
-			case "strict":
-				o.Strict = opts.Get(k).ToBoolean()
-			}
-		}
-	}
+	o.Strict = parseStrict(ctx, opts)
 	return nil
 }
 
@@ -243,19 +274,10 @@ func NewFrameFillOptions(defaultTimeout time.Duration) *FrameFillOptions {
 }
 
 func (o *FrameFillOptions) Parse(ctx context.Context, opts goja.Value) error {
-	rt := k6ext.Runtime(ctx)
 	if err := o.ElementHandleBaseOptions.Parse(ctx, opts); err != nil {
 		return err
 	}
-	if opts != nil && !goja.IsUndefined(opts) && !goja.IsNull(opts) {
-		opts := opts.ToObject(rt)
-		for _, k := range opts.Keys() {
-			switch k {
-			case "strict":
-				o.Strict = opts.Get(k).ToBoolean()
-			}
-		}
-	}
+	o.Strict = parseStrict(ctx, opts)
 	return nil
 }
 
@@ -296,19 +318,10 @@ func NewFrameHoverOptions(defaultTimeout time.Duration) *FrameHoverOptions {
 }
 
 func (o *FrameHoverOptions) Parse(ctx context.Context, opts goja.Value) error {
-	rt := k6ext.Runtime(ctx)
 	if err := o.ElementHandleHoverOptions.Parse(ctx, opts); err != nil {
 		return err
 	}
-	if opts != nil && !goja.IsUndefined(opts) && !goja.IsNull(opts) {
-		opts := opts.ToObject(rt)
-		for _, k := range opts.Keys() {
-			switch k {
-			case "strict":
-				o.Strict = opts.Get(k).ToBoolean()
-			}
-		}
-	}
+	o.Strict = parseStrict(ctx, opts)
 	return nil
 }
 
@@ -403,29 +416,23 @@ func (o *FrameIsEnabledOptions) Parse(ctx context.Context, opts goja.Value) erro
 	return nil
 }
 
-func NewFrameIsHiddenOptions(defaultTimeout time.Duration) *FrameIsHiddenOptions {
-	return &FrameIsHiddenOptions{
-		FrameBaseOptions: *NewFrameBaseOptions(defaultTimeout),
-	}
+// NewFrameIsHiddenOptions creates and returns a new instance of FrameIsHiddenOptions.
+func NewFrameIsHiddenOptions() *FrameIsHiddenOptions {
+	return &FrameIsHiddenOptions{}
 }
 
 func (o *FrameIsHiddenOptions) Parse(ctx context.Context, opts goja.Value) error {
-	if err := o.FrameBaseOptions.Parse(ctx, opts); err != nil {
-		return err
-	}
+	o.Strict = parseStrict(ctx, opts)
 	return nil
 }
 
-func NewFrameIsVisibleOptions(defaultTimeout time.Duration) *FrameIsVisibleOptions {
-	return &FrameIsVisibleOptions{
-		FrameBaseOptions: *NewFrameBaseOptions(defaultTimeout),
-	}
+// NewFrameIsVisibleOptions creates and returns a new instance of FrameIsVisibleOptions.
+func NewFrameIsVisibleOptions() *FrameIsVisibleOptions {
+	return &FrameIsVisibleOptions{}
 }
 
 func (o *FrameIsVisibleOptions) Parse(ctx context.Context, opts goja.Value) error {
-	if err := o.FrameBaseOptions.Parse(ctx, opts); err != nil {
-		return err
-	}
+	o.Strict = parseStrict(ctx, opts)
 	return nil
 }
 
@@ -450,19 +457,10 @@ func NewFrameSelectOptionOptions(defaultTimeout time.Duration) *FrameSelectOptio
 }
 
 func (o *FrameSelectOptionOptions) Parse(ctx context.Context, opts goja.Value) error {
-	rt := k6ext.Runtime(ctx)
 	if err := o.ElementHandleBaseOptions.Parse(ctx, opts); err != nil {
 		return err
 	}
-	if opts != nil && !goja.IsUndefined(opts) && !goja.IsNull(opts) {
-		opts := opts.ToObject(rt)
-		for _, k := range opts.Keys() {
-			switch k {
-			case "strict":
-				o.Strict = opts.Get(k).ToBoolean()
-			}
-		}
-	}
+	o.Strict = parseStrict(ctx, opts)
 	return nil
 }
 
@@ -491,6 +489,22 @@ func (o *FrameSetContentOptions) Parse(ctx context.Context, opts goja.Value) err
 		}
 	}
 
+	return nil
+}
+
+// NewFrameSetInputFilesOptions creates a new FrameSetInputFilesOptions.
+func NewFrameSetInputFilesOptions(defaultTimeout time.Duration) *FrameSetInputFilesOptions {
+	return &FrameSetInputFilesOptions{
+		ElementHandleSetInputFilesOptions: *NewElementHandleSetInputFilesOptions(defaultTimeout),
+		Strict:                            false,
+	}
+}
+
+// Parse parses FrameSetInputFilesOptions from goja.Value.
+func (o *FrameSetInputFilesOptions) Parse(ctx context.Context, opts goja.Value) error {
+	if err := o.ElementHandleSetInputFilesOptions.Parse(ctx, opts); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -559,19 +573,10 @@ func NewFrameUncheckOptions(defaultTimeout time.Duration) *FrameUncheckOptions {
 }
 
 func (o *FrameUncheckOptions) Parse(ctx context.Context, opts goja.Value) error {
-	rt := k6ext.Runtime(ctx)
 	if err := o.ElementHandleBasePointerOptions.Parse(ctx, opts); err != nil {
 		return err
 	}
-	if opts != nil && !goja.IsUndefined(opts) && !goja.IsNull(opts) {
-		opts := opts.ToObject(rt)
-		for _, k := range opts.Keys() {
-			switch k {
-			case "strict":
-				o.Strict = opts.Get(k).ToBoolean()
-			}
-		}
-	}
+	o.Strict = parseStrict(ctx, opts)
 	return nil
 }
 
@@ -708,4 +713,20 @@ func NewFrameDispatchEventOptions(defaultTimeout time.Duration) *FrameDispatchEv
 	return &FrameDispatchEventOptions{
 		FrameBaseOptions: NewFrameBaseOptions(defaultTimeout),
 	}
+}
+
+func parseStrict(ctx context.Context, opts goja.Value) bool {
+	var strict bool
+
+	rt := k6ext.Runtime(ctx)
+	if opts != nil && !goja.IsUndefined(opts) && !goja.IsNull(opts) {
+		opts := opts.ToObject(rt)
+		for _, k := range opts.Keys() {
+			if k == "strict" {
+				strict = opts.Get(k).ToBoolean()
+			}
+		}
+	}
+
+	return strict
 }

@@ -9,21 +9,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/grafana/xk6-browser/api"
-	"github.com/grafana/xk6-browser/common/js"
-	"github.com/grafana/xk6-browser/k6ext"
-
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/dom"
 	cdppage "github.com/chromedp/cdproto/page"
 	"github.com/dop251/goja"
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/grafana/xk6-browser/common/js"
+	"github.com/grafana/xk6-browser/k6ext"
 )
 
-const resultDone = "done"
-
-// Ensure ElementHandle implements the api.ElementHandle and api.JSHandle interfaces.
-var _ api.ElementHandle = &ElementHandle{}
-var _ api.JSHandle = &ElementHandle{}
+const (
+	resultDone       = "done"
+	resultNeedsInput = "needsinput"
+)
 
 type (
 	elementHandleActionFunc        func(context.Context, *ElementHandle) (any, error)
@@ -71,11 +70,7 @@ func (h *ElementHandle) checkHitTargetAt(apiCtx context.Context, point Position)
 		if err != nil {
 			return false, err
 		}
-		element, ok := el.(*ElementHandle)
-		if !ok {
-			return false, fmt.Errorf("unexpected type %T", el)
-		}
-		box, err := element.boundingBox()
+		box, err := el.boundingBox()
 		if err != nil {
 			return false, err
 		}
@@ -101,12 +96,8 @@ func (h *ElementHandle) checkHitTargetAt(apiCtx context.Context, point Position)
 	}
 
 	// Either we're done or an error happened (returned as "error:..." from JS)
-	const done = "done"
-	v, ok := result.(goja.Value)
-	if !ok {
-		return false, fmt.Errorf("unexpected type %T", result)
-	}
-	if v.ExportType().Kind() != reflect.String {
+	const done = resultDone
+	if v, ok := result.(string); !ok {
 		// We got a { hitTargetDescription: ... } result
 		// Meaning: Another element is preventing pointer events.
 		//
@@ -115,8 +106,8 @@ func (h *ElementHandle) checkHitTargetAt(apiCtx context.Context, point Position)
 		// because we don't need any more functionality from this JS function
 		// right now.
 		return false, errorFromDOMError("error:intercept")
-	} else if v.String() != done {
-		return false, errorFromDOMError(v.String())
+	} else if v != done {
+		return false, errorFromDOMError(v)
 	}
 
 	return true, nil
@@ -136,18 +127,11 @@ func (h *ElementHandle) checkElementState(_ context.Context, state string) (*boo
 	if err != nil {
 		return nil, err
 	}
-	v, ok := result.(goja.Value)
-	if !ok {
-		return nil, fmt.Errorf("unexpected type %T", result)
-	}
-	//nolint:exhaustive
-	switch v.ExportType().Kind() {
-	case reflect.String: // An error happened (returned as "error:..." from JS)
-		return nil, errorFromDOMError(v.String())
-	case reflect.Bool:
-		returnVal := new(bool)
-		*returnVal = v.ToBoolean()
-		return returnVal, nil
+	switch v := result.(type) {
+	case string: // An error happened (returned as "error:..." from JS)
+		return nil, errorFromDOMError(v)
+	case bool:
+		return &v, nil
 	}
 
 	return nil, fmt.Errorf(
@@ -252,7 +236,7 @@ func (h *ElementHandle) defaultTimeout() time.Duration {
 	return h.frame.manager.timeoutSettings.timeout()
 }
 
-func (h *ElementHandle) dispatchEvent(_ context.Context, typ string, eventInit goja.Value) (any, error) {
+func (h *ElementHandle) dispatchEvent(_ context.Context, typ string, eventInit any) (any, error) {
 	fn := `
 		(node, injected, type, eventInit) => {
 			injected.dispatchEvent(node, type, eventInit);
@@ -281,11 +265,14 @@ func (h *ElementHandle) fill(_ context.Context, value string) error {
 	if err != nil {
 		return err
 	}
-	v, ok := result.(goja.Value)
+	s, ok := result.(string)
 	if !ok {
 		return fmt.Errorf("unexpected type %T", result)
 	}
-	if s := v.String(); s != resultDone {
+
+	if s == resultNeedsInput {
+		h.frame.page.Keyboard.InsertText(value)
+	} else if s != resultDone {
 		// Either we're done or an error happened (returned as "error:..." from JS)
 		return errorFromDOMError(s)
 	}
@@ -307,12 +294,15 @@ func (h *ElementHandle) focus(apiCtx context.Context, resetSelectionIfNotFocused
 	if err != nil {
 		return err
 	}
-	switch result := result.(type) {
-	case string: // Either we're done or an error happened (returned as "error:..." from JS)
-		if result != "done" {
-			return errorFromDOMError(result)
-		}
+	s, ok := result.(string)
+	if !ok {
+		return fmt.Errorf("unexpected type %T", result)
 	}
+	if s != resultDone {
+		// Either we're done or an error happened (returned as "error:..." from JS)
+		return errorFromDOMError(s)
+	}
+
 	return nil
 }
 
@@ -329,7 +319,7 @@ func (h *ElementHandle) getAttribute(apiCtx context.Context, name string) (any, 
 	return h.eval(apiCtx, opts, js)
 }
 
-func (h *ElementHandle) hover(apiCtx context.Context, p *Position) error {
+func (h *ElementHandle) hover(_ context.Context, p *Position) error {
 	return h.frame.page.Mouse.move(p.X, p.Y, NewMouseMoveOptions())
 }
 
@@ -356,6 +346,7 @@ func (h *ElementHandle) innerText(apiCtx context.Context) (any, error) {
 		forceCallable: true,
 		returnByValue: true,
 	}
+
 	return h.eval(apiCtx, opts, js)
 }
 
@@ -391,12 +382,12 @@ func (h *ElementHandle) isEnabled(apiCtx context.Context, timeout time.Duration)
 	return h.waitForElementState(apiCtx, []string{"enabled"}, timeout)
 }
 
-func (h *ElementHandle) isHidden(apiCtx context.Context, timeout time.Duration) (bool, error) {
-	return h.waitForElementState(apiCtx, []string{"hidden"}, timeout)
+func (h *ElementHandle) isHidden(apiCtx context.Context) (bool, error) {
+	return h.waitForElementState(apiCtx, []string{"hidden"}, 0)
 }
 
-func (h *ElementHandle) isVisible(apiCtx context.Context, timeout time.Duration) (bool, error) {
-	return h.waitForElementState(apiCtx, []string{"visible"}, timeout)
+func (h *ElementHandle) isVisible(apiCtx context.Context) (bool, error) {
+	return h.waitForElementState(apiCtx, []string{"visible"}, 0)
 }
 
 func (h *ElementHandle) offsetPosition(apiCtx context.Context, offset *Position) (*Position, error) {
@@ -414,21 +405,9 @@ func (h *ElementHandle) offsetPosition(apiCtx context.Context, offset *Position)
 		return nil, err
 	}
 
-	rt := h.execCtx.vu.Runtime()
 	var border struct{ Top, Left float64 }
-	switch result := result.(type) {
-	case goja.Value:
-		if result != nil && !goja.IsUndefined(result) && !goja.IsNull(result) {
-			obj := result.ToObject(rt)
-			for _, k := range obj.Keys() {
-				switch k {
-				case "left":
-					border.Left = obj.Get(k).ToFloat()
-				case "top":
-					border.Top = obj.Get(k).ToFloat()
-				}
-			}
-		}
+	if err := convert(result, &border); err != nil {
+		return nil, fmt.Errorf("converting result (%v of type %t) to border: %w", result, result, err)
 	}
 
 	box := h.BoundingBox()
@@ -448,13 +427,13 @@ func (h *ElementHandle) ownerFrame(apiCtx context.Context) *Frame {
 	if frameId == "" {
 		return nil
 	}
-	frame := h.frame.page.frameManager.getFrameByID(frameId)
-	if frame != nil {
+	frame, ok := h.frame.page.frameManager.getFrameByID(frameId)
+	if ok {
 		return frame
 	}
 	for _, page := range h.frame.page.browserCtx.browser.pages {
-		frame = page.frameManager.getFrameByID(frameId)
-		if frame != nil {
+		frame, ok = page.frameManager.getFrameByID(frameId)
+		if ok {
 			return frame
 		}
 	}
@@ -580,7 +559,7 @@ func (h *ElementHandle) selectOption(apiCtx context.Context, values goja.Value) 
 	}
 	switch result := result.(type) {
 	case string: // An error happened (returned as "error:..." from JS)
-		if result != "done" {
+		if result != resultDone {
 			return nil, errorFromDOMError(result)
 		}
 	}
@@ -603,7 +582,7 @@ func (h *ElementHandle) selectText(apiCtx context.Context) error {
 	}
 	switch result := result.(type) {
 	case string: // Either we're done or an error happened (returned as "error:..." from JS)
-		if result != "done" {
+		if result != resultDone {
 			return errorFromDOMError(result)
 		}
 	}
@@ -675,19 +654,14 @@ func (h *ElementHandle) waitForElementState(
 	if err != nil {
 		return false, errorFromDOMError(err)
 	}
-	v, ok := result.(goja.Value)
-	if !ok {
-		return false, fmt.Errorf("unexpected type %T", result)
-	}
-	//nolint:exhaustive
-	switch v.ExportType().Kind() {
-	case reflect.String: // Either we're done or an error happened (returned as "error:..." from JS)
-		if v.String() == "done" {
+	switch v := result.(type) {
+	case string: // Either we're done or an error happened (returned as "error:..." from JS)
+		if v == resultDone {
 			return true, nil
 		}
-		return false, errorFromDOMError(v.String())
-	case reflect.Bool:
-		return v.ToBoolean(), nil
+		return false, errorFromDOMError(v)
+	case bool:
+		return v, nil
 	}
 
 	return false, fmt.Errorf(
@@ -725,34 +699,30 @@ func (h *ElementHandle) waitForSelector(apiCtx context.Context, selector string,
 }
 
 // AsElement returns this element handle.
-func (h *ElementHandle) AsElement() api.ElementHandle {
+func (h *ElementHandle) AsElement() *ElementHandle {
 	return h
 }
 
 // BoundingBox returns this element's bounding box.
-func (h *ElementHandle) BoundingBox() *api.Rect {
+func (h *ElementHandle) BoundingBox() *Rect {
 	bbox, err := h.boundingBox()
 	if err != nil {
 		return nil // Don't panic here, just return nil
 	}
-	return bbox.toApiRect()
+	return bbox
 }
 
 // Click scrolls element into view and clicks in the center of the element
 // TODO: look into making more robust using retries
 // (see: https://github.com/microsoft/playwright/blob/master/src/server/dom.ts#L298)
-func (h *ElementHandle) Click(opts goja.Value) error {
-	actionOpts := NewElementHandleClickOptions(h.defaultTimeout())
-	if err := actionOpts.Parse(h.ctx, opts); err != nil {
-		k6ext.Panic(h.ctx, "parsing element click options: %v", err)
-	}
+func (h *ElementHandle) Click(opts *ElementHandleClickOptions) error {
 	click := h.newPointerAction(
 		func(apiCtx context.Context, handle *ElementHandle, p *Position) (any, error) {
-			return nil, handle.click(p, actionOpts.ToMouseClickOptions())
+			return nil, handle.click(p, opts.ToMouseClickOptions())
 		},
-		&actionOpts.ElementHandleBasePointerOptions,
+		&opts.ElementHandleBasePointerOptions,
 	)
-	if _, err := call(h.ctx, click, actionOpts.Timeout); err != nil {
+	if _, err := call(h.ctx, click, opts.Timeout); err != nil {
 		return fmt.Errorf("clicking on element: %w", err)
 	}
 	applySlowMo(h.ctx)
@@ -761,7 +731,7 @@ func (h *ElementHandle) Click(opts goja.Value) error {
 }
 
 // ContentFrame returns the frame that contains this element.
-func (h *ElementHandle) ContentFrame() (api.Frame, error) {
+func (h *ElementHandle) ContentFrame() (*Frame, error) {
 	var (
 		node *cdp.Node
 		err  error
@@ -774,7 +744,12 @@ func (h *ElementHandle) ContentFrame() (api.Frame, error) {
 		return nil, fmt.Errorf("element is not an iframe")
 	}
 
-	return h.frame.manager.getFrameByID(node.FrameID), nil
+	frame, ok := h.frame.manager.getFrameByID(node.FrameID)
+	if !ok {
+		return nil, fmt.Errorf("frame not found for id %s", node.FrameID)
+	}
+
+	return frame, nil
 }
 
 func (h *ElementHandle) Dblclick(opts goja.Value) {
@@ -793,7 +768,8 @@ func (h *ElementHandle) Dblclick(opts goja.Value) {
 	applySlowMo(h.ctx)
 }
 
-func (h *ElementHandle) DispatchEvent(typ string, eventInit goja.Value) {
+// DispatchEvent dispatches a DOM event to the element.
+func (h *ElementHandle) DispatchEvent(typ string, eventInit any) error {
 	fn := func(apiCtx context.Context, handle *ElementHandle) (any, error) {
 		return handle.dispatchEvent(apiCtx, typ, eventInit)
 	}
@@ -801,9 +777,12 @@ func (h *ElementHandle) DispatchEvent(typ string, eventInit goja.Value) {
 	actFn := h.newAction([]string{}, fn, opts.Force, opts.NoWaitAfter, opts.Timeout)
 	_, err := call(h.ctx, actFn, opts.Timeout)
 	if err != nil {
-		k6ext.Panic(h.ctx, "dispatching element event: %w", err)
+		return fmt.Errorf("dispatching element event %q: %w", typ, err)
 	}
+
 	applySlowMo(h.ctx)
+
+	return nil
 }
 
 func (h *ElementHandle) Fill(value string, opts goja.Value) {
@@ -838,7 +817,7 @@ func (h *ElementHandle) Focus() {
 }
 
 // GetAttribute retrieves the value of specified element attribute.
-func (h *ElementHandle) GetAttribute(name string) goja.Value {
+func (h *ElementHandle) GetAttribute(name string) any {
 	fn := func(apiCtx context.Context, handle *ElementHandle) (any, error) {
 		return handle.getAttribute(apiCtx, name)
 	}
@@ -850,7 +829,9 @@ func (h *ElementHandle) GetAttribute(name string) goja.Value {
 	}
 	applySlowMo(h.ctx)
 
-	return asGojaValue(h.ctx, v)
+	// TODO: return any with error
+
+	return v
 }
 
 // Hover scrolls element into view and hovers over its center point.
@@ -883,7 +864,9 @@ func (h *ElementHandle) InnerHTML() string {
 	}
 	applySlowMo(h.ctx)
 
-	return gojaValueToString(h.ctx, v)
+	// TODO: handle error
+
+	return v.(string) //nolint:forcetypeassert
 }
 
 // InnerText returns the inner text of the element.
@@ -899,7 +882,9 @@ func (h *ElementHandle) InnerText() string {
 	}
 	applySlowMo(h.ctx)
 
-	return gojaValueToString(h.ctx, v)
+	// TODO: handle error
+
+	return v.(string) //nolint:forcetypeassert
 }
 
 func (h *ElementHandle) InputValue(opts goja.Value) string {
@@ -917,7 +902,9 @@ func (h *ElementHandle) InputValue(opts goja.Value) string {
 	}
 	applySlowMo(h.ctx)
 
-	return gojaValueToString(h.ctx, v)
+	// TODO: return error
+
+	return v.(string) //nolint:forcetypeassert
 }
 
 // IsChecked checks if a checkbox or radio is checked.
@@ -958,7 +945,7 @@ func (h *ElementHandle) IsEnabled() bool {
 
 // IsHidden checks if the element is hidden.
 func (h *ElementHandle) IsHidden() bool {
-	result, err := h.isHidden(h.ctx, 0)
+	result, err := h.isHidden(h.ctx)
 	if err != nil && !errors.Is(err, ErrTimedOut) { // We don't care anout timeout errors here!
 		k6ext.Panic(h.ctx, "checking element is hidden: %w", err)
 	}
@@ -967,7 +954,7 @@ func (h *ElementHandle) IsHidden() bool {
 
 // IsVisible checks if the element is visible.
 func (h *ElementHandle) IsVisible() bool {
-	result, err := h.isVisible(h.ctx, 0)
+	result, err := h.isVisible(h.ctx)
 	if err != nil && !errors.Is(err, ErrTimedOut) { // We don't care anout timeout errors here!
 		k6ext.Panic(h.ctx, "checking element is visible: %w", err)
 	}
@@ -975,7 +962,7 @@ func (h *ElementHandle) IsVisible() bool {
 }
 
 // OwnerFrame returns the frame containing this element.
-func (h *ElementHandle) OwnerFrame() (api.Frame, error) {
+func (h *ElementHandle) OwnerFrame() (*Frame, error) {
 	fn := `
 		(node, injected) => {
 			return injected.getDocumentElement(node);
@@ -1011,7 +998,12 @@ func (h *ElementHandle) OwnerFrame() (api.Frame, error) {
 		return nil, fmt.Errorf("no frame found for node: %w", err)
 	}
 
-	return h.frame.manager.getFrameByID(node.FrameID), nil
+	frame, ok := h.frame.manager.getFrameByID(node.FrameID)
+	if !ok {
+		return nil, fmt.Errorf("no frame found for id %s", node.FrameID)
+	}
+
+	return frame, nil
 }
 
 func (h *ElementHandle) Press(key string, opts goja.Value) {
@@ -1032,28 +1024,28 @@ func (h *ElementHandle) Press(key string, opts goja.Value) {
 
 // Query runs "element.querySelector" within the page. If no element matches the selector,
 // the return value resolves to "null".
-func (h *ElementHandle) Query(selector string) (api.ElementHandle, error) {
+func (h *ElementHandle) Query(selector string, strict bool) (*ElementHandle, error) {
 	parsedSelector, err := NewSelector(selector)
 	if err != nil {
 		k6ext.Panic(h.ctx, "parsing selector %q: %w", selector, err)
 	}
 	fn := `
-		(node, injected, selector) => {
-			return injected.querySelector(selector, node || document, false);
+		(node, injected, selector, strict) => {
+			return injected.querySelector(selector, strict, node || document);
 		}
 	`
 	opts := evalOptions{
 		forceCallable: true,
 		returnByValue: false,
 	}
-	result, err := h.evalWithScript(h.ctx, opts, fn, parsedSelector)
+	result, err := h.evalWithScript(h.ctx, opts, fn, parsedSelector, strict)
 	if err != nil {
 		return nil, fmt.Errorf("querying selector %q: %w", selector, err)
 	}
 	if result == nil {
-		return nil, fmt.Errorf("querying selector %q", selector)
+		return nil, nil //nolint:nilnil
 	}
-	handle, ok := result.(api.JSHandle)
+	handle, ok := result.(JSHandleAPI)
 	if !ok {
 		return nil, fmt.Errorf("querying selector %q, wrong type %T", selector, result)
 	}
@@ -1068,7 +1060,7 @@ func (h *ElementHandle) Query(selector string) (api.ElementHandle, error) {
 
 // QueryAll queries element subtree for matching elements.
 // If no element matches the selector, the return value resolves to "null".
-func (h *ElementHandle) QueryAll(selector string) ([]api.ElementHandle, error) {
+func (h *ElementHandle) QueryAll(selector string) ([]*ElementHandle, error) {
 	defer applySlowMo(h.ctx)
 
 	handles, err := h.queryAll(selector, h.evalWithScript)
@@ -1079,7 +1071,7 @@ func (h *ElementHandle) QueryAll(selector string) ([]api.ElementHandle, error) {
 	return handles, nil
 }
 
-func (h *ElementHandle) queryAll(selector string, eval evalFunc) ([]api.ElementHandle, error) {
+func (h *ElementHandle) queryAll(selector string, eval evalFunc) ([]*ElementHandle, error) {
 	parsedSelector, err := NewSelector(selector)
 	if err != nil {
 		return nil, fmt.Errorf("parsing selector %q: %w", selector, err)
@@ -1098,7 +1090,7 @@ func (h *ElementHandle) queryAll(selector string, eval evalFunc) ([]api.ElementH
 		return nil, nil
 	}
 
-	handles, ok := result.(api.JSHandle)
+	handles, ok := result.(JSHandleAPI)
 	if !ok {
 		return nil, fmt.Errorf("getting element handle for selector %q: %w", selector, ErrJSHandleInvalid)
 	}
@@ -1110,7 +1102,7 @@ func (h *ElementHandle) queryAll(selector string, eval evalFunc) ([]api.ElementH
 		return nil, err //nolint:wrapcheck
 	}
 
-	els := make([]api.ElementHandle, 0, len(props))
+	els := make([]*ElementHandle, 0, len(props))
 	for _, prop := range props {
 		if el := prop.AsElement(); el != nil {
 			els = append(els, el)
@@ -1178,19 +1170,27 @@ func (h *ElementHandle) setChecked(apiCtx context.Context, checked bool, p *Posi
 	return nil
 }
 
-func (h *ElementHandle) Screenshot(opts goja.Value) goja.ArrayBuffer {
-	rt := h.execCtx.vu.Runtime()
-	parsedOpts := NewElementHandleScreenshotOptions(h.defaultTimeout())
-	if err := parsedOpts.Parse(h.ctx, opts); err != nil {
-		k6ext.Panic(h.ctx, "parsing screenshot options: %w", err)
+// Screenshot will instruct Chrome to save a screenshot of the current element and save it to specified file.
+func (h *ElementHandle) Screenshot(
+	opts *ElementHandleScreenshotOptions,
+	sp ScreenshotPersister,
+) ([]byte, error) {
+	spanCtx, span := TraceAPICall(
+		h.ctx,
+		h.frame.page.targetID.String(),
+		"elementHandle.screenshot",
+	)
+	defer span.End()
+
+	span.SetAttributes(attribute.String("screenshot.path", opts.Path))
+
+	s := newScreenshotter(spanCtx, sp)
+	buf, err := s.screenshotElement(h, opts)
+	if err != nil {
+		return nil, fmt.Errorf("taking screenshot of elementHandle: %w", err)
 	}
 
-	s := newScreenshotter(h.ctx)
-	buf, err := s.screenshotElement(h, parsedOpts)
-	if err != nil {
-		k6ext.Panic(h.ctx, "taking screenshot: %w", err)
-	}
-	return rt.NewArrayBuffer(*buf)
+	return buf, err
 }
 
 func (h *ElementHandle) ScrollIntoViewIfNeeded(opts goja.Value) {
@@ -1206,7 +1206,6 @@ func (h *ElementHandle) ScrollIntoViewIfNeeded(opts goja.Value) {
 }
 
 func (h *ElementHandle) SelectOption(values goja.Value, opts goja.Value) []string {
-	rt := h.execCtx.vu.Runtime()
 	actionOpts := NewElementHandleBaseOptions(h.defaultTimeout())
 	if err := actionOpts.Parse(h.ctx, opts); err != nil {
 		k6ext.Panic(h.ctx, "parsing selectOption options: %w", err)
@@ -1220,7 +1219,7 @@ func (h *ElementHandle) SelectOption(values goja.Value, opts goja.Value) []strin
 		k6ext.Panic(h.ctx, "selecting options: %w", err)
 	}
 	var returnVal []string
-	if err := rt.ExportTo(asGojaValue(h.ctx, selectedOptions), &returnVal); err != nil {
+	if err := convert(selectedOptions, &returnVal); err != nil {
 		k6ext.Panic(h.ctx, "unpacking selected options: %w", err)
 	}
 
@@ -1245,10 +1244,54 @@ func (h *ElementHandle) SelectText(opts goja.Value) {
 	applySlowMo(h.ctx)
 }
 
-// SetInputFiles is not implemented.
-func (h *ElementHandle) SetInputFiles(files goja.Value, opts goja.Value) {
-	// TODO: implement
-	k6ext.Panic(h.ctx, "ElementHandle.setInputFiles() has not been implemented yet")
+// SetInputFiles sets the given files into the input file element.
+func (h *ElementHandle) SetInputFiles(files goja.Value, opts goja.Value) error {
+	actionOpts := NewElementHandleSetInputFilesOptions(h.defaultTimeout())
+	if err := actionOpts.Parse(h.ctx, opts); err != nil {
+		return fmt.Errorf("parsing setInputFiles options: %w", err)
+	}
+
+	actionParam := &Files{}
+
+	if err := actionParam.Parse(h.ctx, files); err != nil {
+		return fmt.Errorf("parsing setInputFiles parameter: %w", err)
+	}
+
+	fn := func(apiCtx context.Context, handle *ElementHandle) (any, error) {
+		return nil, handle.setInputFiles(apiCtx, actionParam.Payload)
+	}
+	actFn := h.newAction([]string{}, fn, actionOpts.Force, actionOpts.NoWaitAfter, actionOpts.Timeout)
+	_, err := call(h.ctx, actFn, actionOpts.Timeout)
+	if err != nil {
+		return fmt.Errorf("setting input files: %w", err)
+	}
+
+	return nil
+}
+
+func (h *ElementHandle) setInputFiles(apiCtx context.Context, payload []*File) error {
+	fn := `
+		(node, injected, payload) => {
+			return injected.setInputFiles(node, payload);
+		}
+	`
+	evalOpts := evalOptions{
+		forceCallable: true,
+		returnByValue: true,
+	}
+	result, err := h.evalWithScript(apiCtx, evalOpts, fn, payload)
+	if err != nil {
+		return err
+	}
+	v, ok := result.(string)
+	if !ok {
+		return fmt.Errorf("unexpected type %T", result)
+	}
+	if v != "done" {
+		return errorFromDOMError(v)
+	}
+
+	return nil
 }
 
 func (h *ElementHandle) Tap(opts goja.Value) {
@@ -1281,7 +1324,15 @@ func (h *ElementHandle) TextContent() string {
 	}
 	applySlowMo(h.ctx)
 
-	return gojaValueToString(h.ctx, v)
+	// TODO: handle error
+
+	return v.(string) //nolint:forcetypeassert
+}
+
+// Timeout will return the default timeout or the one set by the user.
+// It's an internal method not to be exposed as a JS API.
+func (h *ElementHandle) Timeout() time.Duration {
+	return h.defaultTimeout()
 }
 
 // Type scrolls element into view, focuses element and types text.
@@ -1314,7 +1365,7 @@ func (h *ElementHandle) WaitForElementState(state string, opts goja.Value) {
 }
 
 // WaitForSelector waits for the selector to appear in the DOM.
-func (h *ElementHandle) WaitForSelector(selector string, opts goja.Value) (api.ElementHandle, error) {
+func (h *ElementHandle) WaitForSelector(selector string, opts goja.Value) (*ElementHandle, error) {
 	parsedOpts := NewFrameWaitForSelectorOptions(h.defaultTimeout())
 	if err := parsedOpts.Parse(h.ctx, opts); err != nil {
 		return nil, fmt.Errorf("parsing waitForSelector %q options: %w", selector, err)
@@ -1541,6 +1592,7 @@ func errorFromDOMError(v any) error {
 		"error:notfillablenumberinput": "cannot type text into input[type=number]",
 		"error:notvaliddate":           "malformed value",
 		"error:notinput":               "node is not an HTMLInputElement",
+		"error:notfile":                "node is not an input[type=file] element",
 		"error:hasnovalue":             "node is not an HTMLInputElement or HTMLTextAreaElement or HTMLSelectElement",
 		"error:notselect":              "element is not a <select> element",
 		"error:notcheckbox":            "not a checkbox or radio button",

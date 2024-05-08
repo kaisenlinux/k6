@@ -573,7 +573,7 @@ func TestRequest(t *testing.T) {
 			logEntry := ts.hook.LastEntry()
 			require.NotNil(t, logEntry)
 			assert.Equal(t, logrus.WarnLevel, logEntry.Level)
-			assert.Contains(t, logEntry.Data["error"].(error).Error(), expErr)
+			assert.ErrorContains(t, logEntry.Data["error"].(error), expErr) //nolint:forcetypeassert
 			assert.Equal(t, "Request Failed", logEntry.Message)
 		})
 
@@ -599,7 +599,7 @@ func TestRequest(t *testing.T) {
 			logEntry := ts.hook.LastEntry()
 			require.NotNil(t, logEntry)
 			assert.Equal(t, logrus.WarnLevel, logEntry.Level)
-			assert.Contains(t, logEntry.Data["error"].(error).Error(), expErr)
+			assert.ErrorContains(t, logEntry.Data["error"].(error), expErr) //nolint:forcetypeassert
 			assert.Equal(t, "Request Failed", logEntry.Message)
 		})
 	})
@@ -908,7 +908,6 @@ func TestRequest(t *testing.T) {
 				assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/cookies"), 200, "")
 			})
 
-			//nolint:paralleltest
 			t.Run("clear", func(t *testing.T) {
 				cookieJar, err := cookiejar.New(nil)
 				assert.NoError(t, err)
@@ -926,7 +925,6 @@ func TestRequest(t *testing.T) {
 				assertRequestMetricsEmitted(t, metrics.GetBufferedSamples(samples), "GET", sr("HTTPBIN_URL/cookies"), 200, "")
 			})
 
-			//nolint:paralleltest
 			t.Run("delete", func(t *testing.T) {
 				cookieJar, err := cookiejar.New(nil)
 				assert.NoError(t, err)
@@ -2010,7 +2008,7 @@ func BenchmarkHandlingOfResponseBodies(b *testing.B) {
 	`)
 
 	testResponseType := func(responseType string) func(b *testing.B) {
-		testCode := strings.Replace(testCodeTemplate, "TEST_RESPONSE_TYPE", responseType, -1)
+		testCode := strings.ReplaceAll(testCodeTemplate, "TEST_RESPONSE_TYPE", responseType)
 		return func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				_, err := rt.RunString(testCode)
@@ -2385,4 +2383,27 @@ func GetTestServerWithCertificate(t *testing.T, certPem, key []byte, suitesIds .
 	require.NoError(t, err)
 	s.Listener = tls.NewListener(s.Listener, s.TLS)
 	return s, client
+}
+
+func TestGzipped204Response(t *testing.T) {
+	t.Parallel()
+	ts := newTestCase(t)
+	tb := ts.tb
+	rt := ts.runtime.VU.Runtime()
+	state := ts.runtime.VU.State()
+	state.Options.Throw = null.BoolFrom(true)
+	sr := tb.Replacer.Replace
+	// We should not try to decode it
+	tb.Mux.HandleFunc("/gzipempty", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	_, err := rt.RunString(sr(`
+				var res = http.get("HTTPBIN_URL/gzipempty");
+				if (res.status != 204) {
+					throw new Error("unexpected status code: " + res.status)
+				}
+			`))
+	assert.NoError(t, err)
 }

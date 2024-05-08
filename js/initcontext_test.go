@@ -241,7 +241,7 @@ func TestInitContextOpen(t *testing.T) {
 		{[]byte("hello world!"), "ascii", 12},
 		{[]byte("?((¯°·._.• ţ€$ţɨɲǥ µɲɨȼ๏ď€ΣSЫ ɨɲ Ќ6 •._.·°¯))؟•"), "utf", 47},
 		{[]byte{0o44, 226, 130, 172}, "utf-8", 2}, // $€
-		//{[]byte{00, 36, 32, 127}, "utf-16", 2},   // $€
+		// {[]byte{00, 36, 32, 127}, "utf-16", 2},   // $€
 	}
 	for _, tc := range testCases {
 		tc := tc
@@ -360,7 +360,6 @@ func TestRequestWithBinaryFile(t *testing.T) {
 				net.Dialer{
 					Timeout:   10 * time.Second,
 					KeepAlive: 60 * time.Second,
-					DualStack: true,
 				},
 				netext.NewResolver(net.LookupIP, 0, types.DNSfirst, types.DNSpreferIPv4),
 			)).DialContext,
@@ -507,7 +506,6 @@ func TestRequestWithMultipleBinaryFiles(t *testing.T) {
 				net.Dialer{
 					Timeout:   10 * time.Second,
 					KeepAlive: 60 * time.Second,
-					DualStack: true,
 				},
 				netext.NewResolver(net.LookupIP, 0, types.DNSfirst, types.DNSpreferIPv4),
 			)).DialContext,

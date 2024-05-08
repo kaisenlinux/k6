@@ -10,7 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/grafana/xk6-browser/api"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/grafana/xk6-browser/k6ext"
 	"github.com/grafana/xk6-browser/log"
 
@@ -32,6 +34,12 @@ import (
 )
 
 const utilityWorldName = "__k6_browser_utility_world__"
+
+// CPUProfile is used in throttleCPU.
+type CPUProfile struct {
+	// rate as a slowdown factor (1 is no throttle, 2 is 2x slowdown, etc).
+	Rate float64
+}
 
 /*
 FrameSession is used for managing a frame's life-cycle, or in other words its full session.
@@ -64,8 +72,10 @@ type FrameSession struct {
 	vu            k6modules.VU
 
 	logger *log.Logger
-	// logger that will properly serialize RemoteObject instances
-	serializer *log.Logger
+
+	// Keep a reference to the main frame span so we can end it
+	// when FrameSession.ctx is Done
+	mainFrameSpan trace.Span
 }
 
 // NewFrameSession initializes and returns a new FrameSession.
@@ -93,7 +103,6 @@ func NewFrameSession(
 		vu:                   k6ext.GetVU(ctx),
 		k6Metrics:            k6Metrics,
 		logger:               l,
-		serializer:           l.ConsoleLogFormatterSerializer(),
 	}
 
 	var parentNM *NetworkManager
@@ -211,8 +220,16 @@ func (fs *FrameSession) initEvents() {
 	go func() {
 		fs.logger.Debugf("NewFrameSession:initEvents:go",
 			"sid:%v tid:%v", fs.session.ID(), fs.targetID)
-		defer fs.logger.Debugf("NewFrameSession:initEvents:go:return",
-			"sid:%v tid:%v", fs.session.ID(), fs.targetID)
+		defer func() {
+			// If there is an active span for main frame,
+			// end it before exiting so it can be flushed
+			if fs.mainFrameSpan != nil {
+				fs.mainFrameSpan.End()
+				fs.mainFrameSpan = nil
+			}
+			fs.logger.Debugf("NewFrameSession:initEvents:go:return",
+				"sid:%v tid:%v", fs.session.ID(), fs.targetID)
+		}()
 
 		for {
 			select {
@@ -295,6 +312,7 @@ func (fs *FrameSession) parseAndEmitWebVitalMetric(object string) error {
 		NumEntries     json.Number
 		NavigationType string
 		URL            string
+		SpanID         string
 	}{}
 
 	if err := json.Unmarshal([]byte(object), &wv); err != nil {
@@ -329,6 +347,14 @@ func (fs *FrameSession) parseAndEmitWebVitalMetric(object string) error {
 			},
 		},
 	})
+
+	_, span := TraceEvent(
+		fs.ctx, fs.targetID.String(), "web_vital", wv.SpanID, trace.WithAttributes(
+			attribute.String("web_vital.name", wv.Name),
+			attribute.Float64("web_vital.value", value),
+			attribute.String("web_vital.rating", wv.Rating),
+		))
+	defer span.End()
 
 	return nil
 }
@@ -401,11 +427,14 @@ func (fs *FrameSession) initIsolatedWorld(name string) error {
 	}
 	fs.isolatedWorlds[name] = true
 
-	var frames []api.Frame
+	var frames []*Frame
 	if fs.isMainFrame() {
 		frames = fs.manager.Frames()
 	} else {
-		frames = []api.Frame{fs.manager.getFrameByID(cdp.FrameID(fs.targetID))}
+		frame, ok := fs.manager.getFrameByID(cdp.FrameID(fs.targetID))
+		if ok {
+			frames = []*Frame{frame}
+		}
 	}
 	for _, frame := range frames {
 		// A frame could have been removed before we execute this, so don't wait around for a reply.
@@ -580,7 +609,7 @@ func (fs *FrameSession) navigateFrame(frame *Frame, url, referrer string) (strin
 }
 
 func (fs *FrameSession) onConsoleAPICalled(event *cdpruntime.EventConsoleAPICalled) {
-	l := fs.serializer.
+	l := fs.logger.
 		WithTime(event.Timestamp.Time()).
 		WithField("source", "browser").
 		WithField("browser_source", "console-api")
@@ -591,26 +620,28 @@ func (fs *FrameSession) onConsoleAPICalled(event *cdpruntime.EventConsoleAPICall
 		}
 		*/
 
-	parsedObjects := make([]any, 0, len(event.Args))
+	parsedObjects := make([]string, 0, len(event.Args))
 	for _, robj := range event.Args {
-		i, err := parseRemoteObject(robj)
+		s, err := parseConsoleRemoteObject(fs.logger, robj)
 		if err != nil {
-			handleParseRemoteObjectErr(fs.ctx, err, l)
+			fs.logger.Errorf("onConsoleAPICalled", "failed to parse console message %v", err)
 		}
-		parsedObjects = append(parsedObjects, i)
+		parsedObjects = append(parsedObjects, s)
 	}
 
-	l = l.WithField("objects", parsedObjects)
+	msg := strings.Join(parsedObjects, " ")
 
 	switch event.Type {
 	case "log", "info":
-		l.Info()
+		l.Info(msg)
 	case "warning":
-		l.Warn()
+		l.Warn(msg)
 	case "error":
-		l.Error()
+		l.Error(msg)
 	default:
-		l.Debug()
+		// this is where debug & other console.* apis will default to (such as
+		// console.table).
+		l.Debug(msg)
 	}
 }
 
@@ -633,8 +664,8 @@ func (fs *FrameSession) onExecutionContextCreated(event *cdpruntime.EventExecuti
 		k6ext.Panic(fs.ctx, "unmarshaling executionContextCreated event JSON: %w", err)
 	}
 	var world executionWorld
-	frame := fs.manager.getFrameByID(i.FrameID)
-	if frame != nil {
+	frame, ok := fs.manager.getFrameByID(i.FrameID)
+	if ok {
 		if i.IsDefault {
 			world = mainWorld
 		} else if event.Context.Name == utilityWorldName && !frame.hasContext(utilityWorld) {
@@ -722,6 +753,49 @@ func (fs *FrameSession) onFrameNavigated(frame *cdp.Frame, initial bool) {
 		k6ext.Panic(fs.ctx, "handling frameNavigated event to %q: %w",
 			frame.URL+frame.URLFragment, err)
 	}
+
+	// Trace navigation only for the main frame.
+	// TODO: How will this affect sub frames such as iframes?
+	if isMainFrame := frame.ParentID == ""; !isMainFrame {
+		return
+	}
+
+	_, fs.mainFrameSpan = TraceNavigation(
+		fs.ctx, fs.targetID.String(), trace.WithAttributes(attribute.String("navigation.url", frame.URL)),
+	)
+
+	var (
+		spanID       = fs.mainFrameSpan.SpanContext().SpanID().String()
+		newFrame, ok = fs.manager.getFrameByID(frame.ID)
+	)
+
+	// Only set the k6SpanId reference if it's a new frame.
+	if !ok {
+		return
+	}
+
+	// Set k6SpanId property in the page so it can be retrieved when pushing
+	// the Web Vitals events from the page execution context and used to
+	// correlate them with the navigation span to which they belong to.
+	setSpanIDProp := func() {
+		js := fmt.Sprintf("window.k6SpanId = '%s';", spanID)
+		err := newFrame.EvaluateGlobal(fs.ctx, js)
+		if err != nil {
+			fs.logger.Errorf(
+				"FrameSession:onFrameNavigated", "error on evaluating window.k6SpanId: %v", err,
+			)
+		}
+	}
+
+	// Executing a CDP command in the event parsing goroutine might deadlock in some cases.
+	// For example a deadlock happens if the content loaded in the frame that has navigated
+	// includes a JavaScript initiated dialog which we have to explicitly accept or dismiss
+	// (see onEventJavascriptDialogOpening). In that case our EvaluateGlobal call can't be
+	// executed, as the browser is waiting for us to accept/dismiss the JS dialog, but we
+	// can't act on that because the event parsing goroutine is stuck in onFrameNavigated.
+	// Because in this case the action is to set an attribute to the global object (window)
+	// it should be safe to just execute this in a separate goroutine.
+	go setSpanIDProp()
 }
 
 func (fs *FrameSession) onFrameRequestedNavigation(event *cdppage.EventFrameRequestedNavigation) {
@@ -782,8 +856,8 @@ func (fs *FrameSession) onPageLifecycle(event *cdppage.EventLifecycleEvent) {
 		"sid:%v tid:%v fid:%v event:%s eventTime:%q",
 		fs.session.ID(), fs.targetID, event.FrameID, event.Name, event.Timestamp.Time())
 
-	frame := fs.manager.getFrameByID(event.FrameID)
-	if frame == nil {
+	_, ok := fs.manager.getFrameByID(event.FrameID)
+	if !ok {
 		return
 	}
 
@@ -884,8 +958,8 @@ func (fs *FrameSession) onAttachedToTarget(event *target.EventAttachedToTarget) 
 
 // attachIFrameToTarget attaches an IFrame target to a given session.
 func (fs *FrameSession) attachIFrameToTarget(ti *target.Info, sid target.SessionID) error {
-	fr := fs.manager.getFrameByID(cdp.FrameID(ti.TargetID))
-	if fr == nil {
+	fr, ok := fs.manager.getFrameByID(cdp.FrameID(ti.TargetID))
+	if !ok {
 		// IFrame should be attached to fs.page with EventFrameAttached
 		// event before.
 		fs.logger.Debugf("FrameSession:attachIFrameToTarget:return",
@@ -1021,6 +1095,21 @@ func (fs *FrameSession) updateOffline(initial bool) {
 	if !initial || offline {
 		fs.networkManager.SetOfflineMode(offline)
 	}
+}
+
+func (fs *FrameSession) throttleNetwork(networkProfile NetworkProfile) error {
+	fs.logger.Debugf("NewFrameSession:throttleNetwork", "sid:%v tid:%v", fs.session.ID(), fs.targetID)
+
+	return fs.networkManager.ThrottleNetwork(networkProfile)
+}
+
+func (fs *FrameSession) throttleCPU(cpuProfile CPUProfile) error {
+	action := emulation.SetCPUThrottlingRate(cpuProfile.Rate)
+	if err := action.Do(cdp.WithExecutor(fs.ctx, fs.session)); err != nil {
+		return fmt.Errorf("throttling CPU: %w", err)
+	}
+
+	return nil
 }
 
 func (fs *FrameSession) updateRequestInterception(enable bool) error {

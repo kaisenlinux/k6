@@ -1,7 +1,14 @@
-// Package browser provides an entry point to the browser module.
+// Package browser is the browser module's entry point, and
+// initializer of various global types, and a translation layer
+// between Goja and the internal business logic.
+//
+// It initializes and drives the downstream components by passing
+// the necessary concrete dependencies.
 package browser
 
 import (
+	"context"
+	"io"
 	"log"
 	"net/http"
 	_ "net/http/pprof" //nolint:gosec
@@ -17,18 +24,28 @@ import (
 )
 
 type (
+	// filePersister is the type that all file persisters must implement. It's job is
+	// to persist a file somewhere, hiding the details of where and how from the caller.
+	filePersister interface {
+		Persist(ctx context.Context, path string, data io.Reader) (err error)
+	}
+
 	// RootModule is the global module instance that will create module
 	// instances for each VU.
 	RootModule struct {
 		PidRegistry    *pidRegistry
 		remoteRegistry *remoteRegistry
 		initOnce       *sync.Once
+		tracesMetadata map[string]string
+		filePersister  filePersister
+		testRunID      string
 	}
 
 	// JSModule exposes the properties available to the JS script.
 	JSModule struct {
-		Browser *goja.Object
-		Devices map[string]common.Device
+		Browser         *goja.Object
+		Devices         map[string]common.Device
+		NetworkProfiles map[string]common.NetworkProfile `js:"networkProfiles"`
 	}
 
 	// ModuleInstance represents an instance of the JS module.
@@ -64,11 +81,21 @@ func (m *RootModule) NewModuleInstance(vu k6modules.VU) k6modules.Instance {
 	return &ModuleInstance{
 		mod: &JSModule{
 			Browser: mapBrowserToGoja(moduleVU{
-				VU:              vu,
-				pidRegistry:     m.PidRegistry,
-				browserRegistry: newBrowserRegistry(vu, m.remoteRegistry, m.PidRegistry),
+				VU:          vu,
+				pidRegistry: m.PidRegistry,
+				browserRegistry: newBrowserRegistry(
+					context.Background(),
+					vu,
+					m.remoteRegistry,
+					m.PidRegistry,
+					m.tracesMetadata,
+				),
+				taskQueueRegistry: newTaskQueueRegistry(vu),
+				filePersister:     m.filePersister,
+				testRunID:         m.testRunID,
 			}),
-			Devices: common.GetDevices(),
+			Devices:         common.GetDevices(),
+			NetworkProfiles: common.GetNetworkProfiles(),
 		},
 	}
 }
@@ -90,8 +117,19 @@ func (m *RootModule) initialize(vu k6modules.VU) {
 	if err != nil {
 		k6ext.Abort(vu.Context(), "failed to create remote registry: %v", err)
 	}
+	m.tracesMetadata, err = parseTracesMetadata(initEnv.LookupEnv)
+	if err != nil {
+		k6ext.Abort(vu.Context(), "parsing browser traces metadata: %v", err)
+	}
 	if _, ok := initEnv.LookupEnv(env.EnableProfiling); ok {
 		go startDebugServer()
+	}
+	m.filePersister, err = newScreenshotPersister(initEnv.LookupEnv)
+	if err != nil {
+		k6ext.Abort(vu.Context(), "failed to create file persister: %v", err)
+	}
+	if e, ok := initEnv.LookupEnv(env.K6TestRunID); ok && e != "" {
+		m.testRunID = e
 	}
 }
 
