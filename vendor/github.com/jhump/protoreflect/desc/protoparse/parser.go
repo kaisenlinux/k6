@@ -40,7 +40,12 @@ func FileContentsFromMap(files map[string]string) FileAccessor {
 	return func(filename string) (io.ReadCloser, error) {
 		contents, ok := files[filename]
 		if !ok {
-			return nil, os.ErrNotExist
+			// Try changing path separators since user-provided
+			// map may use different separators.
+			contents, ok = files[filepath.ToSlash(filename)]
+			if !ok {
+				return nil, os.ErrNotExist
+			}
 		}
 		return ioutil.NopCloser(strings.NewReader(contents)), nil
 	}
@@ -241,6 +246,7 @@ func (r noCloneParseResult) Clone() parser.Result {
 // ErrorReporter always returns nil, the parse fails with ErrInvalidSource.
 func (p Parser) ParseFilesButDoNotLink(filenames ...string) ([]*descriptorpb.FileDescriptorProto, error) {
 	rep := newReporter(p.ErrorReporter, p.WarningReporter)
+	p.ImportPaths = nil // not used for this "do not link" operation.
 	res, _ := p.getResolver(filenames)
 	results, err := parseToProtos(res, filenames, reporter.NewHandler(rep), p.ValidateUnlinkedFiles)
 	if err != nil {
@@ -555,16 +561,9 @@ func (p Parser) getResolver(filenames []string) (protocompile.Resolver, *ast2.So
 		}))
 	}
 	backupResolver := protocompile.WithStandardImports(importResolver)
-	mustBeSource := make(map[string]struct{}, len(filenames))
-	for _, name := range filenames {
-		mustBeSource[name] = struct{}{}
-	}
 	return protocompile.CompositeResolver{
 		sourceResolver,
 		protocompile.ResolverFunc(func(path string) (protocompile.SearchResult, error) {
-			if _, ok := mustBeSource[path]; ok {
-				return protocompile.SearchResult{}, os.ErrNotExist
-			}
 			return backupResolver.FindFileByPath(path)
 		}),
 	}, &srcSpan

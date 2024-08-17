@@ -1,4 +1,4 @@
-// Copyright 2020-2023 Buf Technologies, Inc.
+// Copyright 2020-2024 Buf Technologies, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -764,7 +764,7 @@ func (l *protoLex) errWithCurrentPos(err error, offset int) reporter.ErrorWithPo
 
 func (l *protoLex) requireSemicolon(semicolons []*ast.RuneNode) (*ast.RuneNode, []*ast.RuneNode) {
 	if len(semicolons) == 0 {
-		l.Error("expected ';'")
+		l.Error("syntax error: expecting ';'")
 		return nil, nil
 	}
 	return semicolons[0], semicolons[1:]

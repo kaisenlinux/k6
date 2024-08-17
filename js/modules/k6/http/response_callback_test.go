@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.k6.io/k6/lib"
@@ -71,7 +71,7 @@ func TestExpectedStatuses(t *testing.T) {
 			}
 
 			require.Error(t, err)
-			var exc *goja.Exception
+			var exc *sobek.Exception
 			errors.As(err, &exc)
 			require.ErrorContains(t, exc, testCase.err)
 		})
@@ -283,10 +283,10 @@ func TestResponseCallbackInAction(t *testing.T) {
 				assertRequestMetricsEmittedSingle(t, bufSamples[i], expectedSample.tags, expectedSample.metrics, nil)
 			}
 		}
-		t.Run(name, func(t *testing.T) {
+		t.Run(name, func(_ *testing.T) {
 			runCode(testCase.code)
 		})
-		t.Run("async_"+name, func(t *testing.T) {
+		t.Run("async_"+name, func(_ *testing.T) {
 			runCode(strings.ReplaceAll(testCase.code, "http.request", "http.asyncRequest"))
 		})
 	}

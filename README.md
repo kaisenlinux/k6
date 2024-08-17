@@ -31,9 +31,10 @@ Its core features are:
 - **Tests as code.** Reuse scripts, modularize logic, version control, and integrate tests with your CI.
 - **A full-featured API.** The scripting API is packed with features that help you simulate real application traffic.
 - **An embedded JavaScript engine.** The performance of Go, the scripting familiarity of JavaScript.
-- **Multiple Protocol support**. HTTP, WebSockets, gRPC, and more.
+- **Multiple Protocol support**. HTTP, WebSockets, gRPC, Browser, and more.
 - **Large extension ecosystem.** You can extend k6 to support your needs. And many people have already shared their extensions with the community!
 - **Flexible metrics storage and visualization**. Summary statistics or granular metrics, exported to the service of your choice.
+- **Native integration with Grafana cloud**. [SaaS solution](https://grafana.com/products/cloud/k6/) for test execution, metrics correlation, data analysis, and more. 
 
 This is what load testing looks like in the 21st century.
 
@@ -91,6 +92,8 @@ These links barely scratch the surface! If you're looking for conceptual informa
 Our team is dedicated to continuously improving and providing the best user experience possible. The [public roadmap](https://github.com/orgs/grafana/projects/443/views/1) covers user-oriented features, UX improvements and JavaScript support that our team will focus on. Remember that timeframes and priorities may shift, but we believe it's important to share our vision.
 
 We hope it provides a clear overview of our plans for future development. We welcome feedback, corrections, and suggestions via GitHub to make it more comprehensive, accessible, and valuable for the community.
+
+It's worth mentioning that we consider [upvotes (thumbs-up)](https://github.com/grafana/k6/issues?q=is%3Aissue+is%3Aopen+sort%3Areactions-%2B1-desc) to be one of the essential metrics for determining community needs. If you want to show us the importance of a feature, please give it a thumbs-up.
 
 ## Contribute
 

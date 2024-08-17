@@ -2,12 +2,14 @@
 package timers
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/mstoykov/k6-taskqueue-lib/taskqueue"
 	"github.com/sirupsen/logrus"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
+	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
 )
 
@@ -62,10 +64,12 @@ func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 func (e *Timers) Exports() modules.Exports {
 	return modules.Exports{
 		Named: map[string]interface{}{
-			"setTimeout":    e.setTimeout,
-			"clearTimeout":  e.clearTimeout,
-			"setInterval":   e.setInterval,
-			"clearInterval": e.clearInterval,
+			// TODO the usage of `ToValue` here is so that Sobek doesn't do it automatically later
+			// which will effectively create new instance each time it is accessed.
+			"setTimeout":    e.vu.Runtime().ToValue(e.setTimeout),
+			"clearTimeout":  e.vu.Runtime().ToValue(e.clearTimeout),
+			"setInterval":   e.vu.Runtime().ToValue(e.setInterval),
+			"clearInterval": e.vu.Runtime().ToValue(e.clearInterval),
 		},
 	}
 }
@@ -75,13 +79,13 @@ func (e *Timers) nextID() uint64 {
 	return e.timerIDCounter
 }
 
-func (e *Timers) call(callback goja.Callable, args []goja.Value) error {
+func (e *Timers) call(callback sobek.Callable, args []sobek.Value) error {
 	// TODO: investigate, not sure GlobalObject() is always the correct value for `this`?
 	_, err := callback(e.vu.Runtime().GlobalObject(), args...)
 	return err
 }
 
-func (e *Timers) setTimeout(callback goja.Callable, delay float64, args ...goja.Value) uint64 {
+func (e *Timers) setTimeout(callback sobek.Callable, delay float64, args ...sobek.Value) uint64 {
 	id := e.nextID()
 	e.timerInitialization(callback, delay, args, false, id)
 	return id
@@ -104,7 +108,7 @@ func (e *Timers) freeEventLoopIfPossible() {
 	}
 }
 
-func (e *Timers) setInterval(callback goja.Callable, delay float64, args ...goja.Value) uint64 {
+func (e *Timers) setInterval(callback sobek.Callable, delay float64, args ...sobek.Value) uint64 {
 	id := e.nextID()
 	e.timerInitialization(callback, delay, args, true, id)
 	return id
@@ -117,11 +121,20 @@ func (e *Timers) clearInterval(id uint64) {
 // https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#timer-initialisation-steps
 // NOTE: previousId from the specification is always send and it is basically id
 func (e *Timers) timerInitialization(
-	callback goja.Callable, timeout float64, args []goja.Value, repeat bool, id uint64,
+	callback sobek.Callable, timeout float64, args []sobek.Value, repeat bool, id uint64,
 ) {
 	// skip all the nesting stuff as we do not care about them
 	if timeout < 0 {
 		timeout = 0
+	}
+
+	name := setTimeoutName
+	if repeat {
+		name = setIntervalName
+	}
+
+	if callback == nil {
+		common.Throw(e.vu.Runtime(), fmt.Errorf("%s's callback isn't a callable function", name))
 	}
 
 	task := func() error {
@@ -143,11 +156,6 @@ func (e *Timers) timerInitialization(
 		}
 
 		return err
-	}
-
-	name := setTimeoutName
-	if repeat {
-		name = setIntervalName
 	}
 
 	e.runAfterTimeout(&timer{

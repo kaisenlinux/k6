@@ -4,9 +4,8 @@ package grpc
 import (
 	"errors"
 	"fmt"
-	"sync"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"github.com/mstoykov/k6-taskqueue-lib/taskqueue"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
@@ -16,9 +15,7 @@ import (
 type (
 	// RootModule is the global module instance that will create module
 	// instances for each VU.
-	RootModule struct {
-		warnAboutExperimental *sync.Once
-	}
+	RootModule struct{}
 
 	// ModuleInstance represents an instance of the GRPC module for every VU.
 	ModuleInstance struct {
@@ -38,28 +35,12 @@ func New() *RootModule {
 	return &RootModule{}
 }
 
-// NewExperimental returns a pointer to a new RootModule instance.
-func NewExperimental() *RootModule {
-	return &RootModule{
-		warnAboutExperimental: &sync.Once{},
-	}
-}
-
 // NewModuleInstance implements the modules.Module interface to return
 // a new instance for each VU.
 func (r *RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 	metrics, err := registerMetrics(vu.InitEnv().Registry)
 	if err != nil {
 		common.Throw(vu.Runtime(), fmt.Errorf("failed to register GRPC module metrics: %w", err))
-	}
-
-	if r.warnAboutExperimental != nil {
-		r.warnAboutExperimental.Do(func() {
-			vu.InitEnv().Logger.Warn(
-				"k6/experimental/grpc is now part of the k6 core, please change your imports to use k6/net/grpc instead." +
-					" The k6/experimental/grpc will be removed in k6 v0.51.0",
-			)
-		})
 	}
 
 	mi := &ModuleInstance{
@@ -76,7 +57,7 @@ func (r *RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 }
 
 // NewClient is the JS constructor for the grpc Client.
-func (mi *ModuleInstance) NewClient(_ goja.ConstructorCall) *goja.Object {
+func (mi *ModuleInstance) NewClient(_ sobek.ConstructorCall) *sobek.Object {
 	rt := mi.vu.Runtime()
 	return rt.ToValue(&Client{vu: mi.vu}).ToObject(rt)
 }
@@ -115,7 +96,7 @@ func (mi *ModuleInstance) Exports() modules.Exports {
 }
 
 // stream returns a new stream object
-func (mi *ModuleInstance) stream(c goja.ConstructorCall) *goja.Object {
+func (mi *ModuleInstance) stream(c sobek.ConstructorCall) *sobek.Object {
 	rt := mi.vu.Runtime()
 
 	client, err := extractClient(c.Argument(0), rt)
@@ -171,8 +152,8 @@ func (mi *ModuleInstance) stream(c goja.ConstructorCall) *goja.Object {
 	return s.obj
 }
 
-// extractClient extracts & validates a grpc.Client from a goja.Value.
-func extractClient(v goja.Value, rt *goja.Runtime) (*Client, error) {
+// extractClient extracts & validates a grpc.Client from a sobek.Value.
+func extractClient(v sobek.Value, rt *sobek.Runtime) (*Client, error) {
 	if common.IsNullish(v) {
 		return nil, errors.New("empty gRPC client")
 	}

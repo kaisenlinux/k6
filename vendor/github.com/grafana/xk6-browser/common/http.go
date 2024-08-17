@@ -12,7 +12,7 @@ import (
 
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/network"
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 
 	"github.com/grafana/xk6-browser/k6ext"
 	"github.com/grafana/xk6-browser/log"
@@ -173,24 +173,18 @@ func (r *Request) AllHeaders() map[string]string {
 	return headers
 }
 
-// Failure returns the error text if the request failed.
-func (r *Request) Failure() goja.Value {
-	k6ext.Panic(r.ctx, "Request.failure() has not been implemented yet")
-	return nil
-}
-
 // Frame returns the frame within which the request was made.
 func (r *Request) Frame() *Frame {
 	return r.frame
 }
 
 // HeaderValue returns the value of the given header.
-func (r *Request) HeaderValue(name string) goja.Value {
+func (r *Request) HeaderValue(name string) sobek.Value {
 	rt := r.vu.Runtime()
 	headers := r.AllHeaders()
-	val, ok := headers[name]
+	val, ok := headers[strings.ToLower(name)]
 	if !ok {
-		return goja.Null()
+		return sobek.Null()
 	}
 	return rt.ToValue(val)
 }
@@ -231,27 +225,8 @@ func (r *Request) PostData() string {
 }
 
 // PostDataBuffer returns the request post data as an ArrayBuffer.
-func (r *Request) PostDataBuffer() goja.ArrayBuffer {
-	rt := r.vu.Runtime()
-	return rt.NewArrayBuffer([]byte(r.postData))
-}
-
-// PostDataJSON returns the request post data as a JS object.
-func (r *Request) PostDataJSON() string {
-	k6ext.Panic(r.ctx, "Request.postDataJSON() has not been implemented yet")
-	return ""
-}
-
-// RedirectedFrom returns the request that redirected to this one, if any.
-func (r *Request) RedirectedFrom() *Request {
-	k6ext.Panic(r.ctx, "Request.redirectedFrom() has not been implemented yet")
-	return nil
-}
-
-// RedirectedTo returns the request that this one redirected to, if any.
-func (r *Request) RedirectedTo() *Request {
-	k6ext.Panic(r.ctx, "Request.redirectedTo() has not been implemented yet")
-	return nil
+func (r *Request) PostDataBuffer() []byte {
+	return []byte(r.postData)
 }
 
 // ResourceType returns the request resource type.
@@ -273,7 +248,7 @@ func (r *Request) Size() HTTPMessageSize {
 }
 
 // Timing returns the request timing information.
-func (r *Request) Timing() goja.Value {
+func (r *Request) Timing() sobek.Value {
 	type resourceTiming struct {
 		StartTime             float64 `js:"startTime"`
 		DomainLookupStart     float64 `js:"domainLookupStart"`
@@ -443,18 +418,19 @@ func (r *Response) AllHeaders() map[string]string {
 	return headers
 }
 
-// Body returns the response body as a binary buffer.
-func (r *Response) Body() goja.ArrayBuffer {
+// Body returns the response body as a bytes buffer.
+func (r *Response) Body() ([]byte, error) {
 	if r.status >= 300 && r.status <= 399 {
-		k6ext.Panic(r.ctx, "Response body is unavailable for redirect responses")
+		return nil, fmt.Errorf("response body is unavailable for redirect responses")
 	}
 	if err := r.fetchBody(); err != nil {
-		k6ext.Panic(r.ctx, "getting response body: %w", err)
+		return nil, fmt.Errorf("getting response body: %w", err)
 	}
+
 	r.bodyMu.RLock()
 	defer r.bodyMu.RUnlock()
-	rt := r.vu.Runtime()
-	return rt.NewArrayBuffer(r.body)
+
+	return r.body, nil
 }
 
 // bodySize returns the size in bytes of the response body.
@@ -475,27 +451,17 @@ func (r *Response) bodySize() int64 {
 	return int64(len(r.body))
 }
 
-// Finished waits for response to finish, return error if request failed.
-func (r *Response) Finished() bool {
-	// TODO: should return nil|Error
-	k6ext.Panic(r.ctx, "Response.finished() has not been implemented yet")
-	return false
-}
-
 // Frame returns the frame within which the response was received.
 func (r *Response) Frame() *Frame {
 	return r.request.frame
 }
 
 // HeaderValue returns the value of the given header.
-func (r *Response) HeaderValue(name string) goja.Value {
+// Returns true if the header is present, false otherwise.
+func (r *Response) HeaderValue(name string) (string, bool) {
 	headers := r.AllHeaders()
-	val, ok := headers[name]
-	if !ok {
-		return goja.Null()
-	}
-	rt := r.vu.Runtime()
-	return rt.ToValue(val)
+	v, ok := headers[strings.ToLower(name)]
+	return v, ok
 }
 
 // HeaderValues returns the values of the given header.
@@ -540,23 +506,24 @@ func (r *Response) HeadersArray() []HTTPHeader {
 }
 
 // JSON returns the response body as JSON data.
-func (r *Response) JSON() goja.Value {
-	if r.cachedJSON == nil {
-		if err := r.fetchBody(); err != nil {
-			k6ext.Panic(r.ctx, "getting response body: %w", err)
-		}
-
-		var v any
-		r.bodyMu.RLock()
-		defer r.bodyMu.RUnlock()
-		if err := json.Unmarshal(r.body, &v); err != nil {
-			k6ext.Panic(r.ctx, "unmarshalling response body to JSON: %w", err)
-		}
-		r.cachedJSON = v
+func (r *Response) JSON() (any, error) {
+	if r.cachedJSON != nil {
+		return r.cachedJSON, nil
 	}
-	rt := r.vu.Runtime()
+	if err := r.fetchBody(); err != nil {
+		return nil, fmt.Errorf("getting response body: %w", err)
+	}
 
-	return rt.ToValue(r.cachedJSON)
+	r.bodyMu.RLock()
+	defer r.bodyMu.RUnlock()
+
+	var v any
+	if err := json.Unmarshal(r.body, &v); err != nil {
+		return nil, fmt.Errorf("unmarshalling response body to JSON: %w", err)
+	}
+	r.cachedJSON = v
+
+	return v, nil
 }
 
 // Ok returns true if status code of response if considered ok, otherwise returns false.
@@ -573,15 +540,13 @@ func (r *Response) Request() *Request {
 }
 
 // SecurityDetails returns the security details of the response.
-func (r *Response) SecurityDetails() goja.Value {
-	rt := r.vu.Runtime()
-	return rt.ToValue(r.securityDetails)
+func (r *Response) SecurityDetails() *SecurityDetails {
+	return r.securityDetails
 }
 
 // ServerAddr returns the remote address of the server.
-func (r *Response) ServerAddr() goja.Value {
-	rt := r.vu.Runtime()
-	return rt.ToValue(r.remoteAddress)
+func (r *Response) ServerAddr() *RemoteAddress {
+	return r.remoteAddress
 }
 
 // Size returns the size in bytes of the response.
@@ -603,13 +568,15 @@ func (r *Response) StatusText() string {
 }
 
 // Text returns the response body as a string.
-func (r *Response) Text() string {
+func (r *Response) Text() (string, error) {
 	if err := r.fetchBody(); err != nil {
-		k6ext.Panic(r.ctx, "getting response body as text: %w", err)
+		return "", fmt.Errorf("getting response body as text: %w", err)
 	}
+
 	r.bodyMu.RLock()
 	defer r.bodyMu.RUnlock()
-	return string(r.body)
+
+	return string(r.body), nil
 }
 
 // URL returns the request URL.

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -73,6 +73,34 @@ func getSimpleBundle(tb testing.TB, filename, data string, opts ...interface{}) 
 	)
 }
 
+func getSimpleBundleStdin(tb testing.TB, pwd *url.URL, data string, opts ...interface{}) (*Bundle, error) {
+	fs := fsext.NewMemMapFs()
+	var rtOpts *lib.RuntimeOptions
+	var logger logrus.FieldLogger
+	for _, o := range opts {
+		switch opt := o.(type) {
+		case fsext.Fs:
+			fs = opt
+		case lib.RuntimeOptions:
+			rtOpts = &opt
+		case logrus.FieldLogger:
+			logger = opt
+		default:
+			tb.Fatalf("unknown test option %q", opt)
+		}
+	}
+
+	return NewBundle(
+		getTestPreInitState(tb, logger, rtOpts),
+		&loader.SourceData{
+			URL:  &url.URL{Path: "/-", Scheme: "file"},
+			Data: []byte(data),
+			PWD:  pwd,
+		},
+		map[string]fsext.Fs{"file": fs, "https": fsext.NewMemMapFs()},
+	)
+}
+
 func TestNewBundle(t *testing.T) {
 	t.Parallel()
 	t.Run("Blank", func(t *testing.T) {
@@ -84,19 +112,19 @@ func TestNewBundle(t *testing.T) {
 		t.Parallel()
 		_, err := getSimpleBundle(t, "/script.js", "\x00")
 		require.NotNil(t, err)
-		require.Contains(t, err.Error(), "SyntaxError: file:///script.js: Unexpected character '\x00' (1:0)\n> 1 | \x00\n")
+		require.Contains(t, err.Error(), "file:///script.js: Line 1:1 Unexpected token ILLEGAL (and 1 more errors)")
 	})
 	t.Run("Error", func(t *testing.T) {
 		t.Parallel()
 		_, err := getSimpleBundle(t, "/script.js", `throw new Error("aaaa");`)
 		exception := new(scriptExceptionError)
 		require.ErrorAs(t, err, &exception)
-		require.EqualError(t, err, "Error: aaaa\n\tat file:///script.js:2:7(3)\n")
+		require.EqualError(t, err, "Error: aaaa\n\tat file:///script.js:1:34(3)\n")
 	})
 	t.Run("InvalidExports", func(t *testing.T) {
 		t.Parallel()
 		_, err := getSimpleBundle(t, "/script.js", `module.exports = null`)
-		require.EqualError(t, err, "exports must be an object")
+		require.EqualError(t, err, "GoError: CommonJS's exports must not be null\n") // TODO: try to remove the GoError from herer
 	})
 	t.Run("DefaultUndefined", func(t *testing.T) {
 		t.Parallel()
@@ -159,18 +187,14 @@ func TestNewBundle(t *testing.T) {
 			}{
 				{
 					"InvalidCompat", "es1", `export default function() {};`,
-					`invalid compatibility mode "es1". Use: "extended", "base"`,
-				},
-				// ES2015 modules are not supported
-				{
-					"Modules", "base", `export default function() {};`,
-					"file:///script.js: Line 2:1 Unexpected reserved word (and 2 more errors)",
+					`invalid compatibility mode "es1". Use: "extended", "base", "experimental_enhanced"`,
 				},
 				// BigInt is not supported
 				{
 					"BigInt", "base",
-					`module.exports.default = function() {}; BigInt(1231412444)`,
-					"ReferenceError: BigInt is not defined\n\tat file:///script.js:2:47(7)\n",
+					`module.exports.default = function() {};
+BigInt(1231412444)`,
+					"ReferenceError: BigInt is not defined\n\tat file:///script.js:2:7(7)\n",
 				},
 			}
 
@@ -201,7 +225,7 @@ func TestNewBundle(t *testing.T) {
 				Expr, Error string
 			}{
 				"Array":    {`[]`, "json: cannot unmarshal array into Go value of type lib.Options"},
-				"Function": {`function(){}`, "error parsing script options: json: unsupported type: func(goja.FunctionCall) goja.Value"},
+				"Function": {`function(){}`, "error parsing script options: json: unsupported type: func(sobek.FunctionCall) sobek.Value"},
 			}
 			for name, data := range invalidOptions {
 				t.Run(name, func(t *testing.T) {
@@ -453,7 +477,7 @@ func TestNewBundle(t *testing.T) {
 			require.Len(t, entries, 1)
 			assert.Equal(t, logrus.WarnLevel, entries[0].Level)
 			assert.Contains(t, entries[0].Message, "There were unknown fields")
-			assert.Contains(t, entries[0].Data["error"].(error).Error(), "unknown field \"something\"") //nolint:forcetypeassert
+			assert.Contains(t, entries[0].Data["error"].(error).Error(), "unknown field \"something\"")
 		})
 	})
 }
@@ -479,7 +503,7 @@ func TestNewBundleFromArchive(t *testing.T) {
 		require.Equal(t, lib.Options{VUs: null.IntFrom(12345)}, b.Options)
 		bi, err := b.Instantiate(context.Background(), 0)
 		require.NoError(t, err)
-		val, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
+		val, err := bi.getCallableExport(consts.DefaultFn)(sobek.Undefined())
 		require.NoError(t, err)
 		require.Equal(t, "hi!", val.Export())
 	}
@@ -503,7 +527,7 @@ func TestNewBundleFromArchive(t *testing.T) {
 
 		checkArchive(t, arc, lib.RuntimeOptions{}, "") // default options
 		checkArchive(t, arc, extCompatModeRtOpts, "")
-		checkArchive(t, arc, baseCompatModeRtOpts, "Unexpected reserved word")
+		checkArchive(t, arc, baseCompatModeRtOpts, "")
 	})
 
 	t.Run("es6_script_explicit", func(t *testing.T) {
@@ -514,7 +538,7 @@ func TestNewBundleFromArchive(t *testing.T) {
 
 		checkArchive(t, arc, lib.RuntimeOptions{}, "")
 		checkArchive(t, arc, extCompatModeRtOpts, "")
-		checkArchive(t, arc, baseCompatModeRtOpts, "Unexpected reserved word")
+		checkArchive(t, arc, baseCompatModeRtOpts, "")
 	})
 
 	t.Run("es5_script_with_extended", func(t *testing.T) {
@@ -539,13 +563,6 @@ func TestNewBundleFromArchive(t *testing.T) {
 		checkArchive(t, arc, baseCompatModeRtOpts, "")
 	})
 
-	t.Run("es6_archive_with_wrong_compat_mode", func(t *testing.T) {
-		t.Parallel()
-		arc, err := getArchive(t, es6Code, baseCompatModeRtOpts)
-		require.Error(t, err)
-		require.Nil(t, arc)
-	})
-
 	t.Run("messed_up_archive", func(t *testing.T) {
 		t.Parallel()
 		arc, err := getArchive(t, es6Code, extCompatModeRtOpts)
@@ -553,7 +570,7 @@ func TestNewBundleFromArchive(t *testing.T) {
 		arc.CompatibilityMode = "blah"                                           // intentionally break the archive
 		checkArchive(t, arc, lib.RuntimeOptions{}, "invalid compatibility mode") // fails when it uses the archive one
 		checkArchive(t, arc, extCompatModeRtOpts, "")                            // works when I force the compat mode
-		checkArchive(t, arc, baseCompatModeRtOpts, "Unexpected reserved word")   // failes because of ES6
+		checkArchive(t, arc, baseCompatModeRtOpts, "")                           // still works as even base compatibility supports ESM
 	})
 
 	t.Run("script_options_dont_overwrite_metadata", func(t *testing.T) {
@@ -572,7 +589,7 @@ func TestNewBundleFromArchive(t *testing.T) {
 		require.NoError(t, err)
 		bi, err := b.Instantiate(context.Background(), 0)
 		require.NoError(t, err)
-		val, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
+		val, err := bi.getCallableExport(consts.DefaultFn)(sobek.Undefined())
 		require.NoError(t, err)
 		require.Equal(t, int64(999), val.Export())
 	})
@@ -718,7 +735,7 @@ func TestOpen(t *testing.T) {
 						t.Run(source, func(t *testing.T) {
 							bi, err := b.Instantiate(context.Background(), 0)
 							require.NoError(t, err)
-							v, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
+							v, err := bi.getCallableExport(consts.DefaultFn)(sobek.Undefined())
 							require.NoError(t, err)
 							require.Equal(t, "hi", v.Export())
 						})
@@ -753,7 +770,7 @@ func TestBundleInstantiate(t *testing.T) {
 
 		bi, err := b.Instantiate(context.Background(), 0)
 		require.NoError(t, err)
-		v, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
+		v, err := bi.getCallableExport(consts.DefaultFn)(sobek.Undefined())
 		require.NoError(t, err)
 		require.Equal(t, true, v.Export())
 	})
@@ -820,7 +837,7 @@ func TestBundleEnv(t *testing.T) {
 
 			bi, err := b.Instantiate(context.Background(), 0)
 			require.NoError(t, err)
-			_, err = bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
+			_, err = bi.getCallableExport(consts.DefaultFn)(sobek.Undefined())
 			require.NoError(t, err)
 		})
 	}
@@ -858,7 +875,7 @@ func TestBundleNotSharable(t *testing.T) {
 				require.NoError(t, err)
 				for j := 0; j < iters; j++ {
 					require.NoError(t, bi.Runtime.Set("__ITER", j))
-					_, err := bi.getCallableExport(consts.DefaultFn)(goja.Undefined())
+					_, err := bi.getCallableExport(consts.DefaultFn)(sobek.Undefined())
 					require.NoError(t, err)
 				}
 			}
@@ -921,6 +938,43 @@ func TestBundleMakeArchive(t *testing.T) {
 			assert.Equal(t, `hi`, string(fileData))
 			assert.Equal(t, consts.Version, arc.K6Version)
 			assert.Equal(t, tc.cm.String(), arc.CompatibilityMode)
+		})
+	}
+}
+
+func TestGlobalTimers(t *testing.T) {
+	t.Parallel()
+	data := `
+			import timers from "k6/timers";
+			if (setTimeout != timers.setTimeout) {
+				throw "setTimeout doesn't match";
+			}
+			if (clearTimeout != timers.clearTimeout) {
+				throw "clearTimeout doesn't match";
+			}
+			if (setInterval != timers.setInterval) {
+				throw "setInterval doesn't match";
+			}
+			if (clearInterval != timers.clearInterval) {
+				throw "clearInterval doesn't match";
+			}
+			export default function() {}
+	`
+
+	b1, err := getSimpleBundle(t, "/script.js", data)
+	require.NoError(t, err)
+	logger := testutils.NewLogger(t)
+
+	b2, err := NewBundleFromArchive(getTestPreInitState(t, logger, nil), b1.makeArchive())
+	require.NoError(t, err)
+
+	bundles := map[string]*Bundle{"Source": b1, "Archive": b2}
+	for name, b := range bundles {
+		b := b
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := b.Instantiate(context.Background(), 1)
+			require.NoError(t, err)
 		})
 	}
 }

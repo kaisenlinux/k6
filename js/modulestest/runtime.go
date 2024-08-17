@@ -6,11 +6,12 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/compiler"
 	"go.k6.io/k6/js/eventloop"
 	"go.k6.io/k6/js/modules"
+	"go.k6.io/k6/js/modules/k6/timers"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/metrics"
@@ -32,7 +33,7 @@ func NewRuntime(t testing.TB) *Runtime {
 	t.Cleanup(cancel)
 	vu := &VU{
 		CtxField:     ctx,
-		RuntimeField: goja.New(),
+		RuntimeField: sobek.New(),
 	}
 	vu.RuntimeField.SetFieldNameMapper(common.FieldNameMapper{})
 	vu.InitEnvField = &common.InitEnvironment{
@@ -40,6 +41,7 @@ func NewRuntime(t testing.TB) *Runtime {
 			Logger:   testutils.NewLogger(t),
 			Registry: metrics.NewRegistry(),
 		},
+		CWD: new(url.URL),
 	}
 
 	eventloop := eventloop.New(vu)
@@ -64,7 +66,15 @@ func (r *Runtime) MoveToVUContext(state *lib.State) {
 // SetupModuleSystem sets up the modules system for the Runtime.
 // See [modules.NewModuleResolver] for the meaning of the parameters.
 func (r *Runtime) SetupModuleSystem(goModules map[string]any, loader modules.FileLoader, c *compiler.Compiler) error {
-	r.mr = modules.NewModuleResolver(goModules, loader, c)
+	if goModules == nil {
+		goModules = make(map[string]any)
+	}
+
+	if _, ok := goModules["k6/timers"]; !ok {
+		goModules["k6/timers"] = timers.New()
+	}
+
+	r.mr = modules.NewModuleResolver(goModules, loader, c, r.VU.InitEnvField.CWD)
 	return r.innerSetupModuleSystem()
 }
 
@@ -79,7 +89,7 @@ func (r *Runtime) SetupModuleSystemFromAnother(another *Runtime) error {
 // It is meant as a helper to test code that is expected to be run on the event loop, such
 // as code that returns a promise.
 //
-// A typical usage is to facilitate writing tests for asynchrounous code:
+// A typical usage is to facilitate writing tests for asynchrounous code:
 //
 //	func TestSomething(t *testing.T) {
 //	    runtime := modulestest.NewRuntime(t)
@@ -91,7 +101,7 @@ func (r *Runtime) SetupModuleSystemFromAnother(another *Runtime) error {
 //	    `)
 //	    require.NoError(t, err)
 //	}
-func (r *Runtime) RunOnEventLoop(code string) (value goja.Value, err error) {
+func (r *Runtime) RunOnEventLoop(code string) (value sobek.Value, err error) {
 	defer r.EventLoop.WaitOnRegistered()
 
 	err = r.EventLoop.Start(func() error {
@@ -104,6 +114,6 @@ func (r *Runtime) RunOnEventLoop(code string) (value goja.Value, err error) {
 
 func (r *Runtime) innerSetupModuleSystem() error {
 	ms := modules.NewModuleSystem(r.mr, r.VU)
-	impl := modules.NewLegacyRequireImpl(r.VU, ms, url.URL{})
-	return r.VU.RuntimeField.Set("require", impl.Require)
+	modules.ExportGloballyModule(r.VU.RuntimeField, ms, "k6/timers")
+	return r.VU.RuntimeField.Set("require", ms.Require)
 }

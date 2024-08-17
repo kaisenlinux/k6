@@ -85,26 +85,8 @@ func TestRunnerNew(t *testing.T) {
 	t.Run("Invalid", func(t *testing.T) {
 		t.Parallel()
 		_, err := getSimpleRunner(t, "/script.js", `blarg`)
-		assert.EqualError(t, err, "ReferenceError: blarg is not defined\n\tat file:///script.js:2:1(1)\n")
+		assert.EqualError(t, err, "ReferenceError: blarg is not defined\n\tat file:///script.js:1:28(1)\n")
 	})
-}
-
-func TestRunnerGetDefaultGroup(t *testing.T) {
-	t.Parallel()
-	r1, err := getSimpleRunner(t, "/script.js", `exports.default = function() {};`)
-	require.NoError(t, err)
-	assert.NotNil(t, r1.GetDefaultGroup())
-
-	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	r2, err := NewFromArchive(
-		&lib.TestPreInitState{
-			Logger:         testutils.NewLogger(t),
-			BuiltinMetrics: builtinMetrics,
-			Registry:       registry,
-		}, r1.MakeArchive())
-	require.NoError(t, err)
-	assert.NotNil(t, r2.GetDefaultGroup())
 }
 
 func TestRunnerOptions(t *testing.T) {
@@ -199,7 +181,7 @@ func TestOptionsSettingToScript(t *testing.T) {
 		t.Run(fmt.Sprintf("Variant#%d", i), func(t *testing.T) {
 			t.Parallel()
 			data := variant + `
-					exports.default = function() {
+					export default function() {
 						if (!options) {
 							throw new Error("Expected options to be defined!");
 						}
@@ -398,8 +380,6 @@ func TestDataIsolation(t *testing.T) {
 	require.NoError(t, err)
 	defer stopOutputs(nil)
 
-	require.Empty(t, runner.defaultGroup.Groups)
-
 	stopEmission, err := execScheduler.Init(runCtx, samples)
 	require.NoError(t, err)
 
@@ -416,8 +396,6 @@ func TestDataIsolation(t *testing.T) {
 		require.NoError(t, err)
 		waitForMetricsFlushed()
 	}
-	require.Contains(t, runner.defaultGroup.Groups, "setup")
-	require.Contains(t, runner.defaultGroup.Groups, "teardown")
 	var count int
 	for _, s := range mockOutput.Samples {
 		if s.Metric.Name == "mycounter" {
@@ -571,7 +549,8 @@ func TestRunnerIntegrationImports(t *testing.T) {
 			mod := mod
 			t.Run(mod, func(t *testing.T) {
 				t.Run("Source", func(t *testing.T) {
-					_, err := getSimpleRunner(t, "/script.js", fmt.Sprintf(`import "%s"; exports.default = function() {}`, mod), rtOpts)
+					_, err := getSimpleRunner(t, "/script.js",
+						fmt.Sprintf(`import "%s"; export default function() {}`, mod), rtOpts)
 					require.NoError(t, err)
 				})
 			})
@@ -585,8 +564,8 @@ func TestRunnerIntegrationImports(t *testing.T) {
 			"Absolute":       {"/path/script.js", "/path/to/lib.js"},
 			"Relative":       {"/path/script.js", "./to/lib.js"},
 			"Adjacent":       {"/path/to/script.js", "./lib.js"},
-			"STDIN-Absolute": {"-", "/path/to/lib.js"},
-			"STDIN-Relative": {"-", "./path/to/lib.js"},
+			"STDIN-Absolute": {"/-", "/path/to/lib.js"},
+			"STDIN-Relative": {"/-", "./path/to/lib.js"},
 		}
 		for name, data := range testdata {
 			name, data := name, data
@@ -672,7 +651,6 @@ func TestVURunContext(t *testing.T) {
 				assert.Equal(t, null.IntFrom(10), state.Options.VUs)
 				assert.Equal(t, null.BoolFrom(true), state.Options.Throw)
 				assert.NotNil(t, state.Logger)
-				assert.Equal(t, r.GetDefaultGroup(), state.Group)
 				assert.Equal(t, vu.Transport, state.Transport)
 			}))
 
@@ -770,74 +748,6 @@ func TestVURunInterruptDoesntPanic(t *testing.T) {
 				newCancel()
 				wg.Wait()
 			}
-		})
-	}
-}
-
-func TestVUIntegrationGroups(t *testing.T) {
-	t.Parallel()
-	r1, err := getSimpleRunner(t, "/script.js", `
-		var group = require("k6").group;
-		exports.default = function() {
-			fnOuter();
-			group("my group", function() {
-				fnInner();
-				group("nested group", function() {
-					fnNested();
-				})
-			});
-		}
-		`)
-	require.NoError(t, err)
-
-	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	r2, err := NewFromArchive(
-		&lib.TestPreInitState{
-			Logger:         testutils.NewLogger(t),
-			BuiltinMetrics: builtinMetrics,
-			Registry:       registry,
-		}, r1.MakeArchive())
-	require.NoError(t, err)
-
-	testdata := map[string]*Runner{"Source": r1, "Archive": r2}
-	for name, r := range testdata {
-		r := r
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			vu, err := r.newVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
-			require.NoError(t, err)
-
-			fnOuterCalled := false
-			fnInnerCalled := false
-			fnNestedCalled := false
-			require.NoError(t, vu.Runtime.Set("fnOuter", func() {
-				fnOuterCalled = true
-				assert.Equal(t, r.GetDefaultGroup(), vu.state.Group)
-			}))
-			require.NoError(t, vu.Runtime.Set("fnInner", func() {
-				fnInnerCalled = true
-				g := vu.state.Group
-				assert.Equal(t, "my group", g.Name)
-				assert.Equal(t, r.GetDefaultGroup(), g.Parent)
-			}))
-			require.NoError(t, vu.Runtime.Set("fnNested", func() {
-				fnNestedCalled = true
-				g := vu.state.Group
-				assert.Equal(t, "nested group", g.Name)
-				assert.Equal(t, "my group", g.Parent.Name)
-				assert.Equal(t, r.GetDefaultGroup(), g.Parent.Parent)
-			}))
-
-			activeVU := vu.Activate(&lib.VUActivationParams{RunContext: ctx})
-			err = activeVU.RunOnce()
-			require.NoError(t, err)
-			assert.True(t, fnOuterCalled, "fnOuter() not called")
-			assert.True(t, fnInnerCalled, "fnInner() not called")
-			assert.True(t, fnNestedCalled, "fnNested() not called")
 		})
 	}
 }
@@ -977,7 +887,7 @@ func generateTLSCertificateWithCA(t *testing.T, host string, notBefore time.Time
 
 func getTestServerWithCertificate(t *testing.T, certPem, key []byte) *httptest.Server {
 	server := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}),
 		ReadHeaderTimeout: time.Second,
@@ -1091,8 +1001,8 @@ func TestVUIntegrationInsecureRequests(t *testing.T) {
 					defer cancel()
 					initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
 					require.NoError(t, err)
-					initVU.(*VU).TLSConfig.RootCAs = x509.NewCertPool() //nolint:forcetypeassert
-					initVU.(*VU).TLSConfig.RootCAs.AddCert(cert)        //nolint:forcetypeassert
+					initVU.(*VU).TLSConfig.RootCAs = x509.NewCertPool()
+					initVU.(*VU).TLSConfig.RootCAs.AddCert(cert)
 
 					vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 					err = vu.RunOnce()
@@ -1428,8 +1338,8 @@ func TestVUIntegrationTLSConfig(t *testing.T) {
 					defer cancel()
 					initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
 					require.NoError(t, err)
-					initVU.(*VU).TLSConfig.RootCAs = x509.NewCertPool() //nolint:forcetypeassert
-					initVU.(*VU).TLSConfig.RootCAs.AddCert(cert)        //nolint:forcetypeassert
+					initVU.(*VU).TLSConfig.RootCAs = x509.NewCertPool()
+					initVU.(*VU).TLSConfig.RootCAs.AddCert(cert)
 					vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
 					err = vu.RunOnce()
 					if data.errMsg != "" {
@@ -1442,6 +1352,23 @@ func TestVUIntegrationTLSConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVUIntegrationRequireFunctionError(t *testing.T) {
+	t.Parallel()
+	r, err := getSimpleRunner(t, "/script.js", `
+			exports.default = function() { require("k6/http") }
+		`)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	initVU, err := r.NewVU(ctx, 1, 1, make(chan metrics.SampleContainer, 100))
+	require.NoError(t, err)
+	vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
+	err = vu.RunOnce()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "only available in the init stage")
 }
 
 func TestVUIntegrationOpenFunctionError(t *testing.T) {
@@ -1550,6 +1477,101 @@ func TestVUDoesNonExistingPathnUnderConditions(t *testing.T) {
 	_, err = r.NewVU(context.Background(), 1, 1, make(chan metrics.SampleContainer, 100))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "open() can't be used with files that weren't previously opened during initialization (__VU==0)")
+}
+
+func TestVUDoesRequireUnderV0Condition(t *testing.T) {
+	t.Parallel()
+
+	baseFS := fsext.NewMemMapFs()
+	data := `
+			if (__VU == 0) {
+				let data = require("/home/somebody/test.js");
+			}
+			exports.default = function() {
+				console.log("hey")
+			}
+		`
+	require.NoError(t, fsext.WriteFile(baseFS, "/home/somebody/test.js", []byte(`exports=42`), fs.ModePerm))
+	require.NoError(t, fsext.WriteFile(baseFS, "/script.js", []byte(data), fs.ModePerm))
+
+	fs := fsext.NewCacheOnReadFs(baseFS, fsext.NewMemMapFs(), 0)
+
+	r, err := getSimpleRunner(t, "/script.js", data, fs)
+	require.NoError(t, err)
+
+	_, err = r.NewVU(context.Background(), 1, 1, make(chan metrics.SampleContainer, 100))
+	require.NoError(t, err)
+}
+
+func TestVUDoesNotRequireUnderConditions(t *testing.T) {
+	t.Parallel()
+
+	baseFS := fsext.NewMemMapFs()
+	data := `
+			if (__VU > 0) {
+				let data = require("/home/somebody/test.js");
+			}
+			exports.default = function() {
+				console.log("hey")
+			}
+		`
+	require.NoError(t, fsext.WriteFile(baseFS, "/home/somebody/test.js", []byte(`exports=42`), fs.ModePerm))
+	require.NoError(t, fsext.WriteFile(baseFS, "/script.js", []byte(data), fs.ModePerm))
+
+	fs := fsext.NewCacheOnReadFs(baseFS, fsext.NewMemMapFs(), 0)
+
+	r, err := getSimpleRunner(t, "/script.js", data, fs)
+	require.NoError(t, err)
+
+	_, err = r.NewVU(context.Background(), 1, 1, make(chan metrics.SampleContainer, 100))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), " was not previously resolved during initialization (__VU==0)")
+}
+
+func TestVUDoesRequireUnderConditions(t *testing.T) {
+	t.Parallel()
+
+	baseFS := fsext.NewMemMapFs()
+	data := `
+			if (__VU == 0) {
+				require("/home/somebody/test.js");
+				require("/home/somebody/test2.js");
+			}
+
+			if (__VU % 2 == 1) {
+				require("/home/somebody/test.js");
+			}
+
+			if (__VU % 2 == 0) {
+				require("/home/somebody/test2.js");
+			}
+
+			exports.default = function() {
+				console.log("hey")
+			}
+		`
+	require.NoError(t, fsext.WriteFile(baseFS, "/home/somebody/test.js", []byte(`console.log("test.js", __VU)`), fs.ModePerm))
+	require.NoError(t, fsext.WriteFile(baseFS, "/home/somebody/test2.js", []byte(`console.log("test2.js", __VU)`), fs.ModePerm))
+	require.NoError(t, fsext.WriteFile(baseFS, "/script.js", []byte(data), fs.ModePerm))
+
+	fs := fsext.NewCacheOnReadFs(baseFS, fsext.NewMemMapFs(), 0)
+
+	logger, hook := testutils.NewLoggerWithHook(t, logrus.InfoLevel)
+	r, err := getSimpleRunner(t, "/script.js", data, fs, logger)
+	require.NoError(t, err)
+	logs := hook.Drain()
+	require.Len(t, logs, 2)
+
+	_, err = r.NewVU(context.Background(), 1, 1, make(chan metrics.SampleContainer, 100))
+	require.NoError(t, err)
+	logs = hook.Drain()
+	require.Len(t, logs, 1)
+	require.Contains(t, logs[0].Message, "test.js 1")
+	_, err = r.NewVU(context.Background(), 2, 2, make(chan metrics.SampleContainer, 100))
+	require.NoError(t, err)
+	logs = hook.Drain()
+	require.Len(t, logs, 1)
+	require.Contains(t, logs[0].Message, "test2.js 2")
 }
 
 func TestVUIntegrationCookiesReset(t *testing.T) {
@@ -1754,7 +1776,7 @@ func TestVUIntegrationClientCerts(t *testing.T) {
 	})
 	require.NoError(t, err)
 	srv := &http.Server{ //nolint:gosec
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = fmt.Fprintf(w, "ok")
 		}),
 		ErrorLog: stdlog.New(io.Discard, "", 0),
@@ -2128,7 +2150,7 @@ func TestSystemTags(t *testing.T) {
 	tb := httpmultibin.NewHTTPMultiBin(t)
 
 	// Handle paths with custom logic
-	tb.Mux.HandleFunc("/wrong-redirect", func(w http.ResponseWriter, r *http.Request) {
+	tb.Mux.HandleFunc("/wrong-redirect", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Add("Location", "%")
 		w.WriteHeader(http.StatusTemporaryRedirect)
 	})
@@ -2209,79 +2231,6 @@ func TestSystemTags(t *testing.T) {
 	}
 }
 
-func TestVUPanic(t *testing.T) {
-	t.Parallel()
-	r1, err := getSimpleRunner(t, "/script.js", `
-			var group = require("k6").group;
-			exports.default = function() {
-				group("panic here", function() {
-					if (__ITER == 0) {
-						panic("here we panic");
-					}
-					console.log("here we don't");
-				})
-			}`,
-	)
-	require.NoError(t, err)
-
-	registry := metrics.NewRegistry()
-	builtinMetrics := metrics.RegisterBuiltinMetrics(registry)
-	r2, err := NewFromArchive(
-		&lib.TestPreInitState{
-			Logger:         testutils.NewLogger(t),
-			BuiltinMetrics: builtinMetrics,
-			Registry:       registry,
-		}, r1.MakeArchive())
-	require.NoError(t, err)
-
-	runners := map[string]*Runner{"Source": r1, "Archive": r2}
-	for name, r := range runners {
-		r := r
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			initVU, err := r.NewVU(ctx, 1, 1234, make(chan metrics.SampleContainer, 100))
-			require.NoError(t, err)
-
-			logger := logrus.New()
-			logger.SetLevel(logrus.InfoLevel)
-			logger.Out = io.Discard
-			hook := testutils.NewLogHook(
-				logrus.InfoLevel, logrus.ErrorLevel, logrus.FatalLevel, logrus.PanicLevel,
-			)
-			logger.AddHook(hook)
-
-			vu := initVU.Activate(&lib.VUActivationParams{RunContext: ctx})
-			activeVU, ok := vu.(*ActiveVU)
-			require.True(t, ok)
-			require.NoError(t, activeVU.Runtime.Set("panic", func(str string) { panic(str) }))
-			activeVU.state.Logger = logger
-
-			activeVU.Console.logger = logger.WithField("source", "console")
-			err = vu.RunOnce()
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "a panic occurred during JS execution: here we panic")
-			entries := hook.Drain()
-			require.Len(t, entries, 1)
-			assert.Equal(t, logrus.ErrorLevel, entries[0].Level)
-			require.True(t, strings.HasPrefix(entries[0].Message, "panic: here we panic"))
-			// broken since goja@f3cfc97811c0b4d8337902c3e42fb2371ba1d524 see
-			// https://github.com/dop251/goja/issues/179#issuecomment-783572020
-			// require.True(t, strings.HasSuffix(entries[0].Message, "Goja stack:\nfile:///script.js:3:4(12)"))
-
-			err = vu.RunOnce()
-			require.NoError(t, err)
-
-			entries = hook.Drain()
-			require.Len(t, entries, 1)
-			assert.Equal(t, logrus.InfoLevel, entries[0].Level)
-			require.Contains(t, entries[0].Message, "here we don't")
-		})
-	}
-}
-
 type multiFileTestCase struct {
 	fses       map[string]fsext.Fs
 	rtOpts     lib.RuntimeOptions
@@ -2356,7 +2305,7 @@ func TestComplicatedFileImportsForGRPC(t *testing.T) {
 	t.Parallel()
 	tb := httpmultibin.NewHTTPMultiBin(t)
 
-	tb.GRPCStub.UnaryCallFunc = func(ctx context.Context, sreq *grpc_testing.SimpleRequest) (
+	tb.GRPCStub.UnaryCallFunc = func(_ context.Context, _ *grpc_testing.SimpleRequest) (
 		*grpc_testing.SimpleResponse, error,
 	) {
 		return &grpc_testing.SimpleResponse{

@@ -165,6 +165,8 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 		return err
 	}
 
+	outputs = append(outputs, testRunState.GroupSummary)
+
 	metricsEngine, err := engine.NewMetricsEngine(testRunState.Registry, logger)
 	if err != nil {
 		return err
@@ -192,7 +194,7 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 			logger.Debug("Generating the end-of-test summary...")
 			summaryResult, hsErr := test.initRunner.HandleSummary(globalCtx, &lib.Summary{
 				Metrics:         metricsEngine.ObservedMetrics,
-				RootGroup:       testRunState.Runner.GetDefaultGroup(),
+				RootGroup:       testRunState.GroupSummary.Group(),
 				TestRunDuration: executionState.GetCurrentTestRunDuration(),
 				NoColor:         c.gs.Flags.NoColor,
 				UIState: lib.UIState{
@@ -417,7 +419,7 @@ func (c *cmdRun) run(cmd *cobra.Command, args []string) (err error) {
 
 	// Check what the execScheduler.Run() error is.
 	if err != nil {
-		err = common.UnwrapGojaInterruptedError(err)
+		err = common.UnwrapSobekInterruptedError(err)
 		logger.WithError(err).Debug("Test finished with an error")
 		return err
 	}

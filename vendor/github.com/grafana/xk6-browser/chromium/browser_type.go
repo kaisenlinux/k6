@@ -18,11 +18,8 @@ import (
 	"github.com/grafana/xk6-browser/log"
 	"github.com/grafana/xk6-browser/storage"
 
-	k6common "go.k6.io/k6/js/common"
 	k6modules "go.k6.io/k6/js/modules"
 	k6lib "go.k6.io/k6/lib"
-
-	"github.com/dop251/goja"
 )
 
 // BrowserType provides methods to launch a Chrome browser instance or connect to an existing one.
@@ -39,7 +36,7 @@ type BrowserType struct {
 }
 
 // NewBrowserType registers our custom k6 metrics, creates method mappings on
-// the goja runtime, and returns a new Chrome browser type.
+// the sobek runtime, and returns a new Chrome browser type.
 func NewBrowserType(vu k6modules.VU) *BrowserType {
 	// NOTE: vu.InitEnv() *must* be called from the script init scope,
 	// otherwise it will return nil.
@@ -214,13 +211,6 @@ func (b *BrowserType) tmpdir() string {
 	return dir
 }
 
-// LaunchPersistentContext launches the browser with persistent storage.
-func (b *BrowserType) LaunchPersistentContext(_ string, _ goja.Value) *common.Browser {
-	rt := b.vu.Runtime()
-	k6common.Throw(rt, errors.New("BrowserType.LaunchPersistentContext(userDataDir, opts) has not been implemented yet"))
-	return nil
-}
-
 // Name returns the name of this browser type.
 func (b *BrowserType) Name() string {
 	return "chromium"
@@ -314,7 +304,7 @@ func parseArgs(flags map[string]any) ([]string, error) {
 	for name, value := range flags {
 		switch value := value.(type) {
 		case string:
-			args = append(args, fmt.Sprintf("--%s=%s", name, value))
+			args = append(args, parseStringArg(name, value))
 		case bool:
 			if value {
 				args = append(args, fmt.Sprintf("--%s", name))
@@ -332,6 +322,15 @@ func parseArgs(flags map[string]any) ([]string, error) {
 	// args = append(args, common.BlankPage)
 	// args = append(args, "--no-startup-window")
 	return args, nil
+}
+
+func parseStringArg(flag string, value string) string {
+	if strings.TrimSpace(value) == "" {
+		// If the value is empty, we don't include it in the args list.
+		// Otherwise, it will produce "--name=" which is invalid.
+		return fmt.Sprintf("--%s", flag)
+	}
+	return fmt.Sprintf("--%s=%s", flag, value)
 }
 
 func prepareFlags(lopts *common.BrowserOptions, k6opts *k6lib.Options) (map[string]any, error) {

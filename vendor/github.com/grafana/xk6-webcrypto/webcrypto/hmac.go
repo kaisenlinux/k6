@@ -1,6 +1,7 @@
 package webcrypto
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1" //nolint:gosec
 	"crypto/sha256"
@@ -8,7 +9,7 @@ import (
 	"fmt"
 	"hash"
 
-	"github.com/dop251/goja"
+	"github.com/grafana/sobek"
 	"gopkg.in/guregu/null.v3"
 )
 
@@ -43,7 +44,7 @@ func (hkgp HMACKeyGenParams) hash() string {
 // not present as described in the hmac `generateKey` [specification].
 //
 // [specification]: https://www.w3.org/TR/WebCryptoAPI/#hmac-operations
-func newHMACKeyGenParams(rt *goja.Runtime, normalized Algorithm, params goja.Value) (*HMACKeyGenParams, error) {
+func newHMACKeyGenParams(rt *sobek.Runtime, normalized Algorithm, params sobek.Value) (*HMACKeyGenParams, error) {
 	// The specification doesn't explicitly tell us what to do if the
 	// hash field is not present, but we assume it's a mandatory field
 	// and throw an error if it's not present.
@@ -86,7 +87,7 @@ func newHMACKeyGenParams(rt *goja.Runtime, normalized Algorithm, params goja.Val
 func (hkgp *HMACKeyGenParams) GenerateKey(
 	extractable bool,
 	keyUsages []CryptoKeyUsage,
-) (*CryptoKey, error) {
+) (CryptoKeyGenerationResult, error) {
 	// 1.
 	for _, usage := range keyUsages {
 		switch usage {
@@ -242,7 +243,7 @@ func (hip HMACImportParams) hash() string {
 
 // newHMACImportParams creates a new HMACImportParams object from the given
 // algorithm and params objects.
-func newHMACImportParams(rt *goja.Runtime, normalized Algorithm, params goja.Value) (*HMACImportParams, error) {
+func newHMACImportParams(rt *sobek.Runtime, normalized Algorithm, params sobek.Value) (*HMACImportParams, error) {
 	// The specification doesn't explicitly tell us what to do if the
 	// hash field is not present, but we assume it's a mandatory field
 	// and throw an error if it's not present.
@@ -350,3 +351,51 @@ func (hip *HMACImportParams) ImportKey(
 
 // Ensure that HMACImportParams implements the KeyImporter interface.
 var _ KeyImporter = &HMACImportParams{}
+
+type hmacSignerVerifier struct{}
+
+// Sign .
+func (hmacSignerVerifier) Sign(key CryptoKey, data []byte) ([]byte, error) {
+	keyAlgorithm, ok := key.Algorithm.(hasHash)
+	if !ok {
+		return nil, NewError(InvalidAccessError, "key algorithm does not describe a HMAC key")
+	}
+
+	keyHandle, ok := key.handle.([]byte)
+	if !ok {
+		return nil, NewError(InvalidAccessError, "key handle is of incorrect type")
+	}
+
+	hashFn, ok := getHashFn(keyAlgorithm.hash())
+	if !ok {
+		return nil, NewError(NotSupportedError, "unsupported hash algorithm "+keyAlgorithm.hash())
+	}
+
+	hasher := hmac.New(hashFn, keyHandle)
+	hasher.Write(data)
+
+	return hasher.Sum(nil), nil
+}
+
+// Verify .
+func (hmacSignerVerifier) Verify(key CryptoKey, signature, data []byte) (bool, error) {
+	keyAlgorithm, ok := key.Algorithm.(hasHash)
+	if !ok {
+		return false, NewError(InvalidAccessError, "key algorithm does not describe a HMAC key")
+	}
+
+	keyHandle, ok := key.handle.([]byte)
+	if !ok {
+		return false, NewError(InvalidAccessError, "key handle is of incorrect type")
+	}
+
+	hashFn, ok := getHashFn(keyAlgorithm.hash())
+	if !ok {
+		return false, NewError(InvalidAccessError, "key handle is of incorrect type")
+	}
+
+	hasher := hmac.New(hashFn, keyHandle)
+	hasher.Write(data)
+
+	return hmac.Equal(signature, hasher.Sum(nil)), nil
+}
