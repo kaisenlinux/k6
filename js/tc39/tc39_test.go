@@ -24,13 +24,15 @@ import (
 	"github.com/grafana/sobek"
 	"github.com/grafana/sobek/parser"
 	"github.com/stretchr/testify/assert"
+	"gopkg.in/yaml.v3"
+
 	"go.k6.io/k6/js/compiler"
 	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/js/modulestest"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/testutils"
 	"go.k6.io/k6/loader"
-	"gopkg.in/yaml.v3"
+	"go.k6.io/k6/usage"
 )
 
 const (
@@ -52,19 +54,20 @@ var (
 		false)
 
 	featuresBlockList = []string{
-		"BigInt",                      // not supported at all
 		"IsHTMLDDA",                   // not supported at all
 		"async-iteration",             // not supported at all
-		"top-level-await",             // not supported at all
 		"String.prototype.replaceAll", // not supported at all, Stage 4 since 2020
+		"dynamic-import",              // not support in k6
 
 		// from Sobek
 		"Symbol.asyncIterator",
+		"resizable-arraybuffer",
 		"regexp-named-groups",
-		"regexp-dotall",
-		"regexp-unicode-property-escapes",
+		"regexp-duplicate-named-groups",
 		"regexp-unicode-property-escapes",
 		"regexp-match-indices",
+		"regexp-modifiers",
+		"RegExp.escape",
 		"legacy-regexp",
 		"tail-call-optimization",
 		"Temporal",
@@ -72,17 +75,34 @@ var (
 		"logical-assignment-operators",
 		"Atomics",
 		"Atomics.waitAsync",
+		"Atomics.pause",
 		"FinalizationRegistry",
 		"WeakRef",
-		"numeric-separator-literal",
 		"__getter__",
 		"__setter__",
 		"ShadowRealm",
 		"SharedArrayBuffer",
-		"error-cause",
-		"resizable-arraybuffer", // stage 3 as of 2021 https://github.com/tc39/proposal-resizablearraybuffer
+		"decorators",
 
-		"array-find-from-last", // stage 3 as of 2021 https://github.com/tc39/proposal-array-find-from-last
+		"regexp-duplicate-named-groups",
+		"regexp-v-flag",
+		"iterator-helpers",
+		"symbols-as-weakmap-keys",
+		"uint8array-base64",
+		"String.prototype.toWellFormed",
+		"explicit-resource-management",
+		"set-methods",
+		"promise-try",
+		"promise-with-resolvers",
+		"array-grouping",
+		"Math.sumPrecise",
+		"Float16Array",
+		"arraybuffer-transfer",
+		"Array.fromAsync",
+		"String.prototype.isWellFormed",
+
+		"source-phase-imports",
+		"import-attributes",
 	}
 	skipWords = []string{}
 	skipList  = map[string]bool{
@@ -144,6 +164,11 @@ var (
 		"test/language/expressions/compound-assignment/S11.13.2_A7.10_T2.js": true,
 		"test/language/expressions/compound-assignment/S11.13.2_A7.10_T1.js": true,
 		"test/language/expressions/assignment/S11.13.1_A7_T3.js":             true,
+
+		// timezone (apparently it depends on local timezone settings)
+		"test/built-ins/Date/prototype/toISOString/15.9.5.43-0-8.js":  true,
+		"test/built-ins/Date/prototype/toISOString/15.9.5.43-0-9.js":  true,
+		"test/built-ins/Date/prototype/toISOString/15.9.5.43-0-10.js": true,
 	}
 	pathBasedBlock = []string{ // This completely skips any path matching it without any kind of message
 		"test/annexB/built-ins/Date",
@@ -619,8 +644,14 @@ func (ctx *tc39TestCtx) runFile(base, name string, vm *sobek.Runtime) error {
 
 func (ctx *tc39TestCtx) compileOnly(src, name string, compatibilityMode lib.CompatibilityMode) (*sobek.Program, error) {
 	comp := ctx.compiler()
-	comp.Options = compiler.Options{CompatibilityMode: compatibilityMode}
-	astProgram, _, err := comp.Parse(src, name, false)
+	if compatibilityMode == lib.CompatibilityModeExperimentalEnhanced {
+		code, _, err := compiler.StripTypes(src, name)
+		if err != nil {
+			return nil, err
+		}
+		src = code
+	}
+	astProgram, _, err := comp.Parse(src, name, false, false)
 	if err != nil {
 		return nil, err
 	}
@@ -689,18 +720,34 @@ func (ctx *tc39TestCtx) runTC39Module(name, src string, includes []string, vm *s
 	base := u.JoinPath("..")
 	mr := modules.NewModuleResolver(nil,
 		func(specifier *url.URL, _ string) ([]byte, error) {
-			return fs.ReadFile(os.DirFS("."), specifier.Path[1:])
+			b, err := fs.ReadFile(os.DirFS("."), specifier.Path[1:])
+
+			if ctx.compatibilityMode == lib.CompatibilityModeExperimentalEnhanced {
+				code, _, err := compiler.StripTypes(string(b), name)
+				if err != nil {
+					return nil, err
+				}
+				b = []byte(code)
+			}
+			return b, err
 		},
-		ctx.compiler(), base)
+		ctx.compiler(), base, usage.New(), testutils.NewLogger(ctx.t))
 
 	ms := modules.NewModuleSystem(mr, moduleRuntime.VU)
 	moduleRuntime.VU.InitEnvField.CWD = base
 
 	early = false
-	_, err = ms.RunSourceData(&loader.SourceData{
+	result, err := ms.RunSourceData(&loader.SourceData{
 		Data: []byte(src),
 		URL:  u,
 	})
+	if err == nil {
+		var finished bool
+		_, finished, err = result.Result()
+		if !finished {
+			panic("tc39 has no tests where this should happen")
+		}
+	}
 
 	return early, err
 }

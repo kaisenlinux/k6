@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/grafana/sobek"
 	"github.com/sirupsen/logrus"
@@ -106,7 +107,8 @@ func newBundle(
 	}
 
 	c := bundle.newCompiler(piState.Logger)
-	bundle.ModuleResolver = modules.NewModuleResolver(getJSModules(), generateFileLoad(bundle), c, bundle.pwd)
+	bundle.ModuleResolver = modules.NewModuleResolver(
+		getJSModules(), generateFileLoad(bundle), c, bundle.pwd, piState.Usage, piState.Logger)
 
 	// Instantiate the bundle into a new VM using a bound init context. This uses a context with a
 	// runtime, but no state, to allow module-provided types to function within the init context.
@@ -196,7 +198,7 @@ func (b *Bundle) populateExports(updateOptions bool, bi *BundleInstance) error {
 			}
 			switch k {
 			case consts.Options:
-				if !updateOptions {
+				if !updateOptions || v == nil {
 					continue
 				}
 				var data []byte
@@ -284,6 +286,7 @@ func (bi *BundleInstance) manipulateOptions(options lib.Options) error {
 
 func (b *Bundle) newCompiler(logger logrus.FieldLogger) *compiler.Compiler {
 	c := compiler.New(logger)
+	c.WithUsage(b.preInitState.Usage)
 	c.Options = compiler.Options{
 		CompatibilityMode: b.CompatibilityMode,
 		SourceMapLoader:   generateSourceMapLoader(logger, b.filesystems),
@@ -329,9 +332,10 @@ func (b *Bundle) instantiate(vuImpl *moduleVUImpl, vuID uint64) (*BundleInstance
 		env:          b.preInitState.RuntimeOptions.Env,
 		moduleVUImpl: vuImpl,
 	}
+	var result *modules.RunSourceDataResult
 	callback := func() error { // this exists so that Sobek catches uncatchable panics such as Interrupt
 		var err error
-		bi.mainModule, err = modSys.RunSourceData(b.sourceData)
+		result, err = modSys.RunSourceData(b.sourceData)
 		return err
 	}
 
@@ -343,6 +347,14 @@ func (b *Bundle) instantiate(vuImpl *moduleVUImpl, vuID uint64) (*BundleInstance
 	})
 
 	<-initDone
+
+	if err == nil {
+		var finished bool
+		bi.mainModule, finished, err = result.Result()
+		if !finished {
+			return nil, errors.New("initializing the main module hasn't finished, this is a bug in k6 please report it")
+		}
+	}
 
 	if err != nil {
 		var exception *sobek.Exception
@@ -385,7 +397,17 @@ func (b *Bundle) setupJSRuntime(rt *sobek.Runtime, vuID int64, logger logrus.Fie
 	}
 
 	if b.CompatibilityMode == lib.CompatibilityModeExtended {
-		err = rt.Set("global", rt.GlobalObject())
+		globalThis := rt.GlobalObject()
+		err = globalThis.DefineAccessorProperty("global",
+			rt.ToValue(func() sobek.Value {
+				if err := b.preInitState.Usage.Uint64("usage/global", 1); err != nil {
+					b.preInitState.Logger.WithError(err).Warn("couldn't report usage")
+				}
+				return globalThis
+			}), rt.ToValue(func(newGlobal *sobek.Object) { // probably not a thing that will happen but still
+				globalThis = newGlobal
+			}),
+			sobek.FLAG_TRUE, sobek.FLAG_TRUE)
 		if err != nil {
 			return err
 		}
@@ -434,6 +456,22 @@ func (b *Bundle) setInitGlobals(rt *sobek.Runtime, vu *moduleVUImpl, modSys *mod
 		if err != nil {
 			return nil, err
 		}
+		if !(strings.HasPrefix(filename, "file://") || filepath.IsAbs(filename)) {
+			otherPath, shouldWarn := modSys.ShouldWarnOnParentDirNotMatchingCurrentModuleParentDir(vu, pwd)
+			logger := b.preInitState.Logger
+			if shouldWarn {
+				logger.Warningf("open() was used and is currently relative to '%s', but in the future "+
+					"it will be aligned with how `require` and imports work and will be relative to '%s'. This means "+
+					"that in the future open will open relative path relative to the module/file it is written in. "+
+					"You can future proof this by using `import.meta.resolve()` to get relative paths to the file it "+
+					"is written in the current k6 version.", pwd, otherPath)
+				err = b.preInitState.Usage.Uint64("deprecations/openRelativity", 1)
+				if err != nil {
+					logger.WithError(err).Warn("failed reporting usage of deprecated relativity of open()")
+				}
+			}
+		}
+
 		return openImpl(rt, b.filesystems["file"], pwd, filename, args...)
 	})
 	warnAboutModuleMixing := func(name string) {

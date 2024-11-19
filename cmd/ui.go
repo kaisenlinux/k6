@@ -34,23 +34,24 @@ const (
 	defaultTermWidth = 80
 )
 
+func setColor(noColor bool, c *color.Color) *color.Color {
+	if noColor {
+		c.DisableColor()
+	} else {
+		c.EnableColor()
+	}
+	return c
+}
+
 // getColor returns the requested color, or an uncolored object, depending on
 // the value of noColor. The explicit EnableColor() and DisableColor() are
 // needed because the library checks os.Stdout itself otherwise...
 func getColor(noColor bool, attributes ...color.Attribute) *color.Color {
-	if noColor {
-		c := color.New()
-		c.DisableColor()
-		return c
-	}
-
-	c := color.New(attributes...)
-	c.EnableColor()
-	return c
+	return setColor(noColor, color.New(attributes...))
 }
 
 func getBanner(noColor bool) string {
-	c := getColor(noColor, color.FgCyan)
+	c := setColor(noColor, color.RGB(0xFF, 0x67, 0x1d).Add(color.Bold))
 	return c.Sprint(consts.Banner())
 }
 
@@ -280,10 +281,10 @@ func showProgress(ctx context.Context, gs *state.GlobalState, pbs []*pb.Progress
 	var leftLen int64
 	for _, pb := range pbs {
 		l := pb.Left()
-		leftLen = lib.Max(int64(len(l)), leftLen)
+		leftLen = max(int64(len(l)), leftLen)
 	}
 	// Limit to maximum left text length
-	maxLeft := int(lib.Min(leftLen, maxLeftLength))
+	maxLeft := int(min(leftLen, maxLeftLength))
 
 	var progressBarsLastRenderLock sync.Mutex
 	var progressBarsLastRender []byte

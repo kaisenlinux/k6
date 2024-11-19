@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jhump/protoreflect/desc"
+	"github.com/jhump/protoreflect/desc" //nolint:staticcheck // FIXME: #4035
 	"github.com/jhump/protoreflect/grpcreflect"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/descriptorpb"
@@ -19,6 +19,7 @@ type reflectionClient struct {
 // It is called in the connect function the first time the Client.Connect function is called.
 func (rc *reflectionClient) Reflect(ctx context.Context) (*descriptorpb.FileDescriptorSet, error) {
 	client := grpcreflect.NewClientAuto(ctx, rc.Conn)
+	client.AllowMissingFileDescriptors()
 
 	services, err := client.ListServices()
 	if err != nil {

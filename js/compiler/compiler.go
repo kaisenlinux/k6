@@ -16,17 +16,30 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"go.k6.io/k6/lib"
+	"go.k6.io/k6/usage"
 )
 
 // A Compiler compiles JavaScript or TypeScript source code into a sobek.Program
 type Compiler struct {
 	logger  logrus.FieldLogger
 	Options Options
+	usage   *usage.Usage
 }
 
 // New returns a new Compiler
 func New(logger logrus.FieldLogger) *Compiler {
-	return &Compiler{logger: logger}
+	return &Compiler{
+		logger: logger,
+		// TODO(@mstoykov): unfortunately otherwise we need to do much bigger rewrite around experimental extensions
+		// and likely more extensions tests. This way tests don't need to care about this and the compiler code
+		// doesn't need to check if it has usage set or not.
+		usage: usage.New(),
+	}
+}
+
+// WithUsage allows the compiler to be given [usage.Usage] to use
+func (c *Compiler) WithUsage(u *usage.Usage) {
+	c.usage = u
 }
 
 // Options are options to the compiler
@@ -45,6 +58,7 @@ type parsingState struct {
 	commonJSWrapped   bool // whether the original source is wrapped in a function to make it a CommonJS module
 	compatibilityMode lib.CompatibilityMode
 	compiler          *Compiler
+	esm               bool
 
 	loader func(string) ([]byte, error)
 }
@@ -53,18 +67,27 @@ type parsingState struct {
 // The returned program can be compiled directly by Sobek.
 // Additionally, it returns the end code that has been parsed including any required transformations.
 func (c *Compiler) Parse(
-	src, filename string, commonJSWrap bool,
+	src, filename string, commonJSWrap bool, esm bool,
 ) (prg *ast.Program, finalCode string, err error) {
 	state := &parsingState{
 		loader:            c.Options.SourceMapLoader,
 		compatibilityMode: c.Options.CompatibilityMode,
 		commonJSWrapped:   commonJSWrap,
 		compiler:          c,
+		esm:               esm,
 	}
 	return state.parseImpl(src, filename, commonJSWrap)
 }
 
+const (
+	usageParsedFilesKey   = "usage/parsedFiles"
+	usageParsedTSFilesKey = "usage/parsedTSFiles"
+)
+
 func (ps *parsingState) parseImpl(src, filename string, commonJSWrap bool) (*ast.Program, string, error) {
+	if err := ps.compiler.usage.Uint64(usageParsedFilesKey, 1); err != nil {
+		ps.compiler.logger.WithError(err).Warn("couldn't report usage for " + usageParsedFilesKey)
+	}
 	code := src
 	if commonJSWrap { // the lines in the sourcemap (if available) will be fixed by increaseMappingsByOne
 		code = ps.wrap(code, filename)
@@ -77,7 +100,7 @@ func (ps *parsingState) parseImpl(src, filename string, commonJSWrap bool) (*ast
 		opts = append(opts, parser.WithDisableSourceMaps)
 	}
 
-	if !commonJSWrap {
+	if ps.esm {
 		opts = append(opts, parser.IsModule)
 	}
 
@@ -96,8 +119,11 @@ func (ps *parsingState) parseImpl(src, filename string, commonJSWrap bool) (*ast
 		return prg, code, nil
 	}
 
-	if ps.compatibilityMode == lib.CompatibilityModeExperimentalEnhanced {
-		code, ps.srcMap, err = esbuildTransform(src, filename)
+	if ps.compatibilityMode == lib.CompatibilityModeExperimentalEnhanced && strings.HasSuffix(filename, ".ts") {
+		if err := ps.compiler.usage.Uint64(usageParsedTSFilesKey, 1); err != nil {
+			ps.compiler.logger.WithError(err).Warn("couldn't report usage for " + usageParsedTSFilesKey)
+		}
+		code, ps.srcMap, err = StripTypes(src, filename)
 		if err != nil {
 			return nil, "", err
 		}

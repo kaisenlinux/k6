@@ -1,3 +1,12 @@
+k6 (0.55.0-1kaisen) kaisen-packages; urgency=medium
+
+  * Import the 0.55.0 release
+  * Update the quilt patch
+  * Bump the golang-go version required to build
+  * Import the new logo of k6
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Tue, 19 Nov 2024 17:00:13 +0200
+
 k6 (0.53.0-1kaisen) kaisen-packages; urgency=medium
 
   * Import the 0.53.0 release

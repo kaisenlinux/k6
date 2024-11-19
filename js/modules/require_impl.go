@@ -7,11 +7,16 @@ import (
 	"strings"
 
 	"github.com/grafana/sobek"
+
 	"go.k6.io/k6/loader"
 )
 
 // Require is the actual call that implements require
 func (ms *ModuleSystem) Require(specifier string) (*sobek.Object, error) {
+	if err := ms.resolver.usage.Uint64("usage/require", 1); err != nil {
+		ms.resolver.logger.WithError(err).Warn("couldn't report usage")
+	}
+
 	if specifier == "" {
 		return nil, errors.New("require() can't be used with an empty specifier")
 	}
@@ -43,6 +48,7 @@ func (ms *ModuleSystem) Require(specifier string) (*sobek.Object, error) {
 	} else {
 		panic(fmt.Sprintf("expected sobek.CyclicModuleRecord, but for some reason got a %T", m))
 	}
+	promisesThenIgnore(rt, promise)
 	switch promise.State() {
 	case sobek.PromiseStateRejected:
 		err = promise.Result().Export().(error) //nolint:forcetypeassert
@@ -130,6 +136,32 @@ func (ms *ModuleSystem) CurrentlyRequiredModule() (*url.URL, error) {
 	return loader.Dir(u), nil
 }
 
+// ShouldWarnOnParentDirNotMatchingCurrentModuleParentDir is a helper function to figure out if the provided url
+// is the same folder that an import will be to.
+// It also checks if the modulesystem is locked which means we are past the first init context.
+// If false is returned means that we are not in the init context or the path is matching - so no warning should be done
+// If true, the returned path is the module path that it should be relative to - the one that is checked against.
+func (ms *ModuleSystem) ShouldWarnOnParentDirNotMatchingCurrentModuleParentDir(vu VU, parentModulePwd *url.URL,
+) (string, bool) {
+	if ms.resolver.locked {
+		return "", false
+	}
+	normalizePathToURL := func(path string) string {
+		u, err := url.Parse(path)
+		if err != nil {
+			return path
+		}
+		return loader.Dir(u).String()
+	}
+	parentModuleDir := parentModulePwd.String()
+	parentModuleStr2 := getCurrentModuleScript(vu)
+	parentModuleStr2Dir := normalizePathToURL(parentModuleStr2)
+	if parentModuleDir != parentModuleStr2Dir {
+		return parentModuleStr2, true
+	}
+	return "", false
+}
+
 func toESModuleExports(exp Exports) interface{} {
 	if exp.Named == nil {
 		return exp.Default
@@ -190,4 +222,12 @@ func getPreviousRequiringFile(vu VU) (string, error) {
 		return vu.InitEnv().CWD.JoinPath("./-").String(), nil
 	}
 	return result, nil
+}
+
+// sets the provided promise in such way as to ignore falures
+// this is mostly needed as failures are handled separately and we do not want those to lead to stopping the event loop
+func promisesThenIgnore(rt *sobek.Runtime, promise *sobek.Promise) {
+	call, _ := sobek.AssertFunction(rt.ToValue(promise).ToObject(rt).Get("then"))
+	handler := rt.ToValue(func(_ sobek.Value) {})
+	_, _ = call(rt.ToValue(promise), handler, handler)
 }

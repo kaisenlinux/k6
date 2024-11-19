@@ -26,6 +26,7 @@ import (
 	"go.k6.io/k6/lib/types"
 	"go.k6.io/k6/loader"
 	"go.k6.io/k6/metrics"
+	"go.k6.io/k6/usage"
 )
 
 const isWindows = runtime.GOOS == "windows"
@@ -43,6 +44,7 @@ func getTestPreInitState(tb testing.TB, logger logrus.FieldLogger, rtOpts *lib.R
 		RuntimeOptions: *rtOpts,
 		Registry:       reg,
 		BuiltinMetrics: metrics.RegisterBuiltinMetrics(reg),
+		Usage:          usage.New(),
 	}
 }
 
@@ -124,7 +126,7 @@ func TestNewBundle(t *testing.T) {
 	t.Run("InvalidExports", func(t *testing.T) {
 		t.Parallel()
 		_, err := getSimpleBundle(t, "/script.js", `module.exports = null`)
-		require.EqualError(t, err, "GoError: CommonJS's exports must not be null\n") // TODO: try to remove the GoError from herer
+		require.EqualError(t, err, "CommonJS's exports must not be null")
 	})
 	t.Run("DefaultUndefined", func(t *testing.T) {
 		t.Parallel()
@@ -189,13 +191,6 @@ func TestNewBundle(t *testing.T) {
 					"InvalidCompat", "es1", `export default function() {};`,
 					`invalid compatibility mode "es1". Use: "extended", "base", "experimental_enhanced"`,
 				},
-				// BigInt is not supported
-				{
-					"BigInt", "base",
-					`module.exports.default = function() {};
-BigInt(1231412444)`,
-					"ReferenceError: BigInt is not defined\n\tat file:///script.js:2:7(7)\n",
-				},
 			}
 
 			for _, tc := range testCases {
@@ -217,6 +212,16 @@ BigInt(1231412444)`,
 				export let options = {};
 				export default function() {};
 			`)
+			require.NoError(t, err)
+		})
+		t.Run("Null", func(t *testing.T) {
+			t.Parallel()
+			fs := fsext.NewMemMapFs()
+			require.NoError(t, fsext.WriteFile(fs, "/options.js", []byte("module.exports={}"), 0o644))
+			_, err := getSimpleBundle(t, "/script.js", `
+				export {options} from "./options.js";
+				export default function() {};
+			`, fs)
 			require.NoError(t, err)
 		})
 		t.Run("Invalid", func(t *testing.T) {
@@ -977,4 +982,19 @@ func TestGlobalTimers(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestTopLevelAwaitErrors(t *testing.T) {
+	t.Parallel()
+	data := `
+		const delay = (delayInms) => {
+			return new Promise(resolve => setTimeout(resolve, delayInms));
+		}
+
+		await delay(10).then(() => {something});
+		export default () => {}
+	`
+
+	_, err := getSimpleBundle(t, "/script.js", data)
+	require.ErrorContains(t, err, "ReferenceError: something is not defined")
 }

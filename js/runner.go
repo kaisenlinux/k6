@@ -188,7 +188,6 @@ func (r *Runner) newVU(
 					"deprecation - https://pkg.go.dev/crypto/tls@go1.17#Config.",
 			)
 		})
-		//nolint:staticcheck // ignore SA1019 we can deprecate it but we have to continue to support the previous code.
 		tlsConfig.NameToCertificate = nameToCert
 	}
 	transport := &http.Transport{
@@ -243,6 +242,7 @@ func (r *Runner) newVU(
 		Tags:           lib.NewVUStateTags(vu.Runner.RunTags),
 		BuiltinMetrics: r.preInitState.BuiltinMetrics,
 		TracerProvider: r.preInitState.TracerProvider,
+		Usage:          r.preInitState.Usage,
 	}
 	vu.moduleVUImpl.state = vu.state
 	_ = vu.Runtime.Set("console", vu.Console)
@@ -368,10 +368,9 @@ func (r *Runner) HandleSummary(ctx context.Context, summary *lib.Summary) (map[s
 		return nil, err
 	}
 
-	go func() {
-		<-summaryCtx.Done()
+	_ = context.AfterFunc(summaryCtx, func() {
 		vu.Runtime.Interrupt(context.Canceled)
-	}()
+	})
 	vu.moduleVUImpl.ctx = summaryCtx
 
 	callbackResult := sobek.Undefined()
@@ -540,10 +539,9 @@ func (r *Runner) runPart(
 		return sobek.Undefined(), nil
 	}
 
-	go func() {
-		<-ctx.Done()
+	_ = context.AfterFunc(ctx, func() {
 		vu.Runtime.Interrupt(context.Canceled)
-	}()
+	})
 	vu.moduleVUImpl.ctx = ctx
 
 	groupPath, err := lib.NewGroupPath(lib.RootGroupPath, name)
@@ -706,9 +704,8 @@ func (u *VU) Activate(params *lib.VUActivationParams) lib.ActiveVU {
 		return avu.scIterGlobal
 	}
 
-	go func() {
-		// Wait for the run context to be over
-		<-ctx.Done()
+	// Wait for the run context to be over
+	context.AfterFunc(ctx, func() {
 		// Interrupt the JS runtime
 		u.Runtime.Interrupt(context.Canceled)
 		// Wait for the VU to stop running, if it was, and prevent it from
@@ -718,7 +715,7 @@ func (u *VU) Activate(params *lib.VUActivationParams) lib.ActiveVU {
 		if params.DeactivateCallback != nil {
 			params.DeactivateCallback(u)
 		}
-	}()
+	})
 
 	return avu
 }
@@ -866,13 +863,42 @@ func (u *VU) runFn(
 		u.Transport.CloseIdleConnections()
 	}
 
-	u.state.Samples <- u.Dialer.GetTrail(
-		startTime, endTime, isFullIteration,
-		isDefault, u.state.Tags.GetCurrentValues(), u.Runner.preInitState.BuiltinMetrics)
+	builtinMetrics := u.Runner.preInitState.BuiltinMetrics
+	ctm := u.state.Tags.GetCurrentValues()
+	u.state.Samples <- u.Dialer.IOSamples(endTime, ctm, builtinMetrics)
+
+	if isFullIteration && isDefault {
+		u.state.Samples <- iterationSamples(startTime, endTime, ctm, builtinMetrics)
+	}
 
 	v = unPromisify(v)
 
 	return v, isFullIteration, endTime.Sub(startTime), err
+}
+
+func iterationSamples(
+	startTime, endTime time.Time, ctm metrics.TagsAndMeta, builtinMetrics *metrics.BuiltinMetrics,
+) metrics.Samples {
+	return metrics.Samples([]metrics.Sample{
+		{
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.IterationDuration,
+				Tags:   ctm.Tags,
+			},
+			Time:     endTime,
+			Metadata: ctm.Metadata,
+			Value:    metrics.D(endTime.Sub(startTime)),
+		},
+		{
+			TimeSeries: metrics.TimeSeries{
+				Metric: builtinMetrics.Iterations,
+				Tags:   ctm.Tags,
+			},
+			Time:     endTime,
+			Metadata: ctm.Metadata,
+			Value:    1,
+		},
+	})
 }
 
 func (u *ActiveVU) incrIteration() {

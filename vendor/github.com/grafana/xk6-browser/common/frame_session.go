@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"runtime"
 	"strings"
 	"sync"
@@ -57,7 +58,9 @@ type FrameSession struct {
 	k6Metrics *k6ext.CustomMetrics
 
 	targetID target.ID
-	windowID browser.WindowID
+	// windowID can be 0 when it is associated to an iframe or frame with no UI.
+	windowID    browser.WindowID
+	hasUIWindow bool
 
 	// To understand the concepts of Isolated Worlds, Contexts and Frames and
 	// the relationship betwween them have a look at the following doc:
@@ -76,13 +79,18 @@ type FrameSession struct {
 	// Keep a reference to the main frame span so we can end it
 	// when FrameSession.ctx is Done
 	mainFrameSpan trace.Span
+	// The initial navigation when a new page is created navigates to about:blank.
+	// We want to make sure that the the navigation span is created for this in
+	// onFrameNavigated, but subsequent calls to onFrameNavigated in the same
+	// mainframe never again create a navigation span.
+	initialNavDone bool
 }
 
 // NewFrameSession initializes and returns a new FrameSession.
 //
 //nolint:funlen
 func NewFrameSession(
-	ctx context.Context, s session, p *Page, parent *FrameSession, tid target.ID, l *log.Logger,
+	ctx context.Context, s session, p *Page, parent *FrameSession, tid target.ID, l *log.Logger, hasUIWindow bool,
 ) (_ *FrameSession, err error) {
 	l.Debugf("NewFrameSession", "sid:%v tid:%v", s.ID(), tid)
 
@@ -103,6 +111,7 @@ func NewFrameSession(
 		vu:                   k6ext.GetVU(ctx),
 		k6Metrics:            k6Metrics,
 		logger:               l,
+		hasUIWindow:          hasUIWindow,
 	}
 
 	if err := cdpruntime.RunIfWaitingForDebugger().Do(cdp.WithExecutor(fs.ctx, fs.session)); err != nil {
@@ -113,21 +122,27 @@ func NewFrameSession(
 	if fs.parent != nil {
 		parentNM = fs.parent.networkManager
 	}
-	fs.networkManager, err = NewNetworkManager(ctx, k6Metrics, s, fs.manager, parentNM)
+	fs.networkManager, err = NewNetworkManager(ctx, k6Metrics, s, fs.manager, parentNM, fs.manager.page)
 	if err != nil {
 		l.Debugf("NewFrameSession:NewNetworkManager", "sid:%v tid:%v err:%v",
 			s.ID(), tid, err)
 		return nil, err
 	}
 
-	action := browser.GetWindowForTarget().WithTargetID(fs.targetID)
-	if fs.windowID, _, err = action.Do(cdp.WithExecutor(fs.ctx, fs.session)); err != nil {
-		l.Debugf(
-			"NewFrameSession:GetWindowForTarget",
-			"sid:%v tid:%v err:%v",
-			s.ID(), tid, err)
+	// When a frame creates a new FrameSession without UI (e.g. some iframes) we cannot
+	// retrieve the windowID. Doing so would lead to an error from chromium. For now all
+	// iframes that are attached are setup with hasUIWindow as false which seems to work
+	// as expected for iframes with and without UI elements.
+	if fs.hasUIWindow {
+		action := browser.GetWindowForTarget().WithTargetID(fs.targetID)
+		if fs.windowID, _, err = action.Do(cdp.WithExecutor(fs.ctx, fs.session)); err != nil {
+			l.Debugf(
+				"NewFrameSession:GetWindowForTarget",
+				"sid:%v tid:%v err:%v",
+				s.ID(), tid, err)
 
-		return nil, fmt.Errorf("getting browser window ID: %w", err)
+			return nil, fmt.Errorf("getting browser window ID: %w", err)
+		}
 	}
 
 	fs.initEvents()
@@ -228,6 +243,11 @@ func (fs *FrameSession) initEvents() {
 			// If there is an active span for main frame,
 			// end it before exiting so it can be flushed
 			if fs.mainFrameSpan != nil {
+				// The url needs to be added here instead of at the start of the span
+				// because at the start of the span we don't know the correct url for
+				// the page we're navigating to. At the end of the span we do have this
+				// information.
+				fs.mainFrameSpan.SetAttributes(attribute.String("navigation.url", fs.manager.MainFrameURL()))
 				fs.mainFrameSpan.End()
 				fs.mainFrameSpan = nil
 			}
@@ -336,7 +356,7 @@ func (fs *FrameSession) parseAndEmitWebVitalMetric(object string) error {
 	state := fs.vu.State()
 	tags := state.Tags.GetCurrentValues().Tags
 	if state.Options.SystemTags.Has(k6metrics.TagURL) {
-		tags = tags.With("url", wv.URL)
+		tags = handleURLTag(fs.page, wv.URL, http.MethodGet, tags)
 	}
 
 	tags = tags.With("rating", wv.Rating)
@@ -773,25 +793,44 @@ func (fs *FrameSession) onFrameNavigated(frame *cdp.Frame, initial bool) {
 			frame.URL+frame.URLFragment, err)
 	}
 
-	// Trace navigation only for the main frame.
-	// TODO: How will this affect sub frames such as iframes?
-	if isMainFrame := frame.ParentID == ""; !isMainFrame {
+	// Only create a navigation span once from here, since a new page navigating
+	// to about:blank doesn't call onFrameStartedLoading. All subsequent
+	// navigations call onFrameStartedLoading.
+	if fs.initialNavDone {
 		return
 	}
 
-	_, fs.mainFrameSpan = TraceNavigation(
-		fs.ctx, fs.targetID.String(), trace.WithAttributes(attribute.String("navigation.url", frame.URL)),
-	)
+	fs.initialNavDone = true
+	fs.processNavigationSpan(frame.ID)
+}
 
-	var (
-		spanID       = fs.mainFrameSpan.SpanContext().SpanID().String()
-		newFrame, ok = fs.manager.getFrameByID(frame.ID)
-	)
-
-	// Only set the k6SpanId reference if it's a new frame.
+func (fs *FrameSession) processNavigationSpan(id cdp.FrameID) {
+	newFrame, ok := fs.manager.getFrameByID(id)
 	if !ok {
 		return
 	}
+
+	// Trace navigation only for the main frame.
+	// TODO: How will this affect sub frames such as iframes?
+	if newFrame.page.frameManager.MainFrame() != newFrame {
+		return
+	}
+
+	// End the navigation span if it is non-nil
+	if fs.mainFrameSpan != nil {
+		// The url needs to be added here instead of at the start of the span
+		// because at the start of the span we don't know the correct url for
+		// the page we're navigating to. At the end of the span we do have this
+		// information.
+		fs.mainFrameSpan.SetAttributes(attribute.String("navigation.url", fs.manager.MainFrameURL()))
+		fs.mainFrameSpan.End()
+	}
+
+	_, fs.mainFrameSpan = TraceNavigation(
+		fs.ctx, fs.targetID.String(),
+	)
+
+	spanID := fs.mainFrameSpan.SpanContext().SpanID().String()
 
 	// Set k6SpanId property in the page so it can be retrieved when pushing
 	// the Web Vitals events from the page execution context and used to
@@ -834,6 +873,8 @@ func (fs *FrameSession) onFrameStartedLoading(frameID cdp.FrameID) {
 	fs.logger.Debugf("FrameSession:onFrameStartedLoading",
 		"sid:%v tid:%v fid:%v",
 		fs.session.ID(), fs.targetID, frameID)
+
+	fs.processNavigationSpan(frameID)
 
 	fs.manager.frameLoadingStarted(frameID)
 }
@@ -994,7 +1035,8 @@ func (fs *FrameSession) attachIFrameToTarget(ti *target.Info, sid target.Session
 		fs.ctx,
 		fs.page.browserCtx.getSession(sid),
 		fs.page, fs, ti.TargetID,
-		fs.logger)
+		fs.logger,
+		false)
 	if err != nil {
 		return fmt.Errorf("attaching iframe target ID %v to session ID %v: %w",
 			ti.TargetID, sid, err)
@@ -1187,18 +1229,20 @@ func (fs *FrameSession) updateViewport() error {
 		return fmt.Errorf("emulating viewport: %w", err)
 	}
 
-	// add an inset to viewport depending on the operating system.
-	// this won't add an inset if we're running in headless mode.
-	viewport.calculateInset(
-		fs.page.browserCtx.browser.browserOpts.Headless,
-		runtime.GOOS,
-	)
-	action2 := browser.SetWindowBounds(fs.windowID, &browser.Bounds{
-		Width:  viewport.Width,
-		Height: viewport.Height,
-	})
-	if err := action2.Do(cdp.WithExecutor(fs.ctx, fs.session)); err != nil {
-		return fmt.Errorf("setting window bounds: %w", err)
+	if fs.hasUIWindow {
+		// add an inset to viewport depending on the operating system.
+		// this won't add an inset if we're running in headless mode.
+		viewport.calculateInset(
+			fs.page.browserCtx.browser.browserOpts.Headless,
+			runtime.GOOS,
+		)
+		action2 := browser.SetWindowBounds(fs.windowID, &browser.Bounds{
+			Width:  viewport.Width,
+			Height: viewport.Height,
+		})
+		if err := action2.Do(cdp.WithExecutor(fs.ctx, fs.session)); err != nil {
+			return fmt.Errorf("setting window bounds: %w", err)
+		}
 	}
 
 	return nil

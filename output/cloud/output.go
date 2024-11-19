@@ -16,6 +16,7 @@ import (
 	"go.k6.io/k6/metrics"
 	"go.k6.io/k6/output"
 	cloudv2 "go.k6.io/k6/output/cloud/expv2"
+	"go.k6.io/k6/usage"
 	"gopkg.in/guregu/null.v3"
 )
 
@@ -59,8 +60,18 @@ type Output struct {
 	duration      int64 // in seconds
 	thresholds    map[string][]*metrics.Threshold
 
+	// testArchive is the test archive to be uploaded to the cloud
+	// before the output is Start()-ed.
+	//
+	// It is set by the SetArchive method. If it is nil, the output
+	// will not upload any test archive, such as when the user
+	// uses the --no-archive-upload flag.
+	testArchive *lib.Archive
+
 	client       *cloudapi.Client
 	testStopFunc func(error)
+
+	usage *usage.Usage
 }
 
 // Verify that Output implements the wanted interfaces
@@ -135,6 +146,7 @@ func newOutput(params output.Params) (*Output, error) {
 		executionPlan: params.ExecutionPlan,
 		duration:      int64(duration / time.Second),
 		logger:        logger,
+		usage:         params.Usage,
 	}, nil
 }
 
@@ -183,6 +195,7 @@ func (out *Output) Start() error {
 		VUsMax:     int64(lib.GetMaxPossibleVUs(out.executionPlan)),
 		Thresholds: thresholds,
 		Duration:   out.duration,
+		Archive:    out.testArchive,
 	}
 
 	response, err := out.client.CreateTestRun(testRun)
@@ -230,6 +243,14 @@ func (out *Output) SetThresholds(scriptThresholds map[string]metrics.Thresholds)
 func (out *Output) SetTestRunStopCallback(stopFunc func(error)) {
 	out.testStopFunc = stopFunc
 }
+
+// SetArchive receives the test artifact to be uploaded to the cloud
+// before the output is Start()-ed.
+func (out *Output) SetArchive(archive *lib.Archive) {
+	out.testArchive = archive
+}
+
+var _ output.WithArchive = &Output{}
 
 // Stop gracefully stops all metric emission from the output: when all metric
 // samples are emitted, it makes a cloud API call to finish the test run.
@@ -340,6 +361,11 @@ func (out *Output) startVersionedOutput() error {
 		return errors.New("TestRunID is required")
 	}
 	var err error
+
+	usageErr := out.usage.Strings("cloud/test_run_id", out.testRunID)
+	if usageErr != nil {
+		out.logger.Warning("Couldn't report test run id to usage as part of writing to k6 cloud")
+	}
 
 	// TODO: move here the creation of a new cloudapi.Client
 	// so in the case the config has been overwritten the client uses the correct

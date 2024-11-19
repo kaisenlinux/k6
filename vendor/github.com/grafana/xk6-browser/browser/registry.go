@@ -185,13 +185,26 @@ type browserRegistry struct {
 	stopped atomic.Bool // testing purposes
 }
 
-type browserBuildFunc func(ctx context.Context) (*common.Browser, error)
+type browserBuildFunc func(ctx, vuCtx context.Context) (*common.Browser, error)
 
+// newBrowserRegistry should only take a background context, not a context from
+// k6 (i.e. vu). The reason for this is that we want to control the chromium
+// lifecycle with the k6 event system.
+//
+// The k6 event system gives this extension time to properly cleanup any running
+// chromium subprocesses or connections to a remote chromium instance.
+//
+// A vu context (a context on an iteration) doesn't allow us to do this. Once k6
+// closes a vu context, it basically pulls the rug from under the extensions feet.
 func newBrowserRegistry(
-	ctx context.Context, vu k6modules.VU, remote *remoteRegistry, pids *pidRegistry, tracesMetadata map[string]string,
+	ctx context.Context,
+	vu k6modules.VU,
+	remote *remoteRegistry,
+	pids *pidRegistry,
+	tracesMetadata map[string]string,
 ) *browserRegistry {
 	bt := chromium.NewBrowserType(vu)
-	builder := func(ctx context.Context) (*common.Browser, error) {
+	builder := func(ctx, vuCtx context.Context) (*common.Browser, error) {
 		var (
 			err                    error
 			b                      *common.Browser
@@ -199,13 +212,13 @@ func newBrowserRegistry(
 		)
 
 		if isRemoteBrowser {
-			b, err = bt.Connect(ctx, wsURL)
+			b, err = bt.Connect(ctx, vuCtx, wsURL)
 			if err != nil {
 				return nil, err //nolint:wrapcheck
 			}
 		} else {
 			var pid int
-			b, pid, err = bt.Launch(ctx)
+			b, pid, err = bt.Launch(ctx, vuCtx)
 			if err != nil {
 				return nil, err //nolint:wrapcheck
 			}
@@ -285,12 +298,15 @@ func (r *browserRegistry) handleIterEvents( //nolint:funlen
 			// so we can get access to the k6 TracerProvider.
 			r.initTracesRegistry()
 
-			// Wrap the tracer into the browser context to make it accessible for the other
-			// components that inherit the context so these can use it to trace their actions.
-			tracerCtx := common.WithTracer(ctx, r.tr.tracer)
+			// Wrap the tracer into the VU context to make it accessible for the
+			// other components during the iteration that inherit the VU context.
+			//
+			// All browser APIs should work with the vu context, and allow the
+			// k6 iteration control its lifecycle.
+			tracerCtx := common.WithTracer(r.vu.Context(), r.tr.tracer)
 			tracedCtx := r.tr.startIterationTrace(tracerCtx, data)
 
-			b, err := r.buildFn(tracedCtx)
+			b, err := r.buildFn(ctx, tracedCtx)
 			if err != nil {
 				e.Done()
 				k6ext.Abort(vuCtx, "error building browser on IterStart: %v", err)
@@ -353,6 +369,15 @@ func (r *browserRegistry) deleteBrowser(id int64) {
 		b.Close()
 		delete(r.m, id)
 	}
+}
+
+// This is only used in a test. Avoids having to manipulate the mutex in the
+// test itself.
+func (r *browserRegistry) browserCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return len(r.m)
 }
 
 func (r *browserRegistry) clear() {
@@ -462,6 +487,15 @@ func (r *tracesRegistry) stop() {
 	}
 }
 
+// This is only used in a test. Avoids having to manipulate the mutex in the
+// test itself.
+func (r *tracesRegistry) iterationTracesCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return len(r.m)
+}
+
 func parseTracesMetadata(envLookup env.LookupFunc) (map[string]string, error) {
 	var (
 		ok bool
@@ -498,7 +532,12 @@ func newTaskQueueRegistry(vu k6modules.VU) *taskQueueRegistry {
 	}
 }
 
-func (t *taskQueueRegistry) get(targetID string) *taskqueue.TaskQueue {
+// get will retrieve the taskqueue associated with the given targetID. If one
+// doesn't exist then a new taskqueue will be created.
+//
+// ctx must be the context from the VU, so that we can automatically close the
+// taskqueue when the iteration ends.
+func (t *taskQueueRegistry) get(ctx context.Context, targetID string) *taskqueue.TaskQueue {
 	t.tqMu.Lock()
 	defer t.tqMu.Unlock()
 
@@ -506,6 +545,14 @@ func (t *taskQueueRegistry) get(targetID string) *taskqueue.TaskQueue {
 	if tq == nil {
 		tq = taskqueue.New(t.vu.RegisterCallback)
 		t.tq[targetID] = tq
+
+		// We want to ensure that the taskqueue is closed when the context is
+		// closed.
+		go func(ctx context.Context) {
+			<-ctx.Done()
+
+			tq.Close()
+		}(ctx)
 	}
 
 	return tq

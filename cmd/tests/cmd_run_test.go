@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -475,11 +476,11 @@ func TestSubMetricThresholdNoData(t *testing.T) {
 func getTestServer(tb testing.TB, routes map[string]http.Handler) *httptest.Server {
 	mux := http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		for methodAndRoute, handler := range routes {
-			methodRouteTuple := strings.SplitN(methodAndRoute, " ", 2)
-			regex, err := regexp.Compile(methodRouteTuple[1])
+			method, route, _ := strings.Cut(methodAndRoute, " ")
+			routeRegexp, err := regexp.Compile(route)
 			require.NoError(tb, err)
 
-			if req.Method == methodRouteTuple[0] && regex.Match([]byte(req.URL.String())) {
+			if req.Method == method && routeRegexp.Match([]byte(req.URL.String())) {
 				handler.ServeHTTP(resp, req)
 				return
 			}
@@ -615,7 +616,7 @@ func TestSetupTeardownThresholds(t *testing.T) {
 
 	stdOut := ts.Stdout.String()
 	t.Log(stdOut)
-	assert.Contains(t, stdOut, `✓ checks.........................: 100.00% ✓ 8`)
+	assert.Contains(t, stdOut, `✓ checks.........................: 100.00% 8 out of 8`)
 	assert.Contains(t, stdOut, `✓ http_reqs......................: 8`)
 	assert.Contains(t, stdOut, `✓ iterations.....................: 5`)
 	assert.Contains(t, stdOut, `✓ setup_teardown.................: 3`)
@@ -1434,16 +1435,6 @@ func sum(vals []float64) (sum float64) {
 	return sum
 }
 
-func max(vals []float64) float64 {
-	max := vals[0]
-	for _, val := range vals {
-		if max < val {
-			max = val
-		}
-	}
-	return max
-}
-
 func TestActiveVUsCount(t *testing.T) {
 	t.Parallel()
 
@@ -1499,8 +1490,8 @@ func TestActiveVUsCount(t *testing.T) {
 	jsonResults, err := fsext.ReadFile(ts.FS, "results.json")
 	require.NoError(t, err)
 	// t.Log(string(jsonResults))
-	assert.Equal(t, float64(10), max(getSampleValues(t, jsonResults, "vus_max", nil)))
-	assert.Equal(t, float64(10), max(getSampleValues(t, jsonResults, "vus", nil)))
+	assert.Equal(t, float64(10), slices.Max(getSampleValues(t, jsonResults, "vus_max", nil)))
+	assert.Equal(t, float64(10), slices.Max(getSampleValues(t, jsonResults, "vus", nil)))
 	assert.Equal(t, float64(0), sum(getSampleValues(t, jsonResults, "iterations", nil)))
 
 	logEntries := ts.LoggerHook.Drain()

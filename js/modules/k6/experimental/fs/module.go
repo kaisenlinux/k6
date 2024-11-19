@@ -7,13 +7,16 @@ package fs
 import (
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 
+	"go.k6.io/k6/lib/fsext"
+
 	"github.com/grafana/sobek"
+
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/js/promises"
-	"go.k6.io/k6/lib/fsext"
 )
 
 type (
@@ -135,15 +138,37 @@ func (mi *ModuleInstance) openImpl(path string) (*File, error) {
 		return nil, err
 	}
 
-	return &File{
+	file := &File{
 		Path: path,
-		file: file{
+		ReadSeekStater: &file{
 			path: path,
 			data: data,
 		},
 		vu:    mi.vu,
 		cache: mi.cache,
-	}, nil
+	}
+
+	return file, nil
+}
+
+// Stater is an interface that provides information about a file.
+//
+// Although in the context of this module we have a single implementation
+// of this interface, it is defined to allow exposing the `file`'s behavior
+// to other module through the `ReadSeekStater` interface without having to
+// leak our internal abstraction.
+type Stater interface {
+	// Stat returns a FileInfo describing the named file.
+	Stat() *FileInfo
+}
+
+// ReadSeekStater is an interface that combines the io.ReadSeeker and Stater
+// interfaces and ensure that structs implementing it have the necessary
+// methods to interact with files.
+type ReadSeekStater interface {
+	io.Reader
+	io.Seeker
+	Stater
 }
 
 // File represents a file and exposes methods to interact with it.
@@ -154,8 +179,14 @@ type File struct {
 	// Path holds the name of the file, as presented to [Open].
 	Path string `json:"path"`
 
-	// file contains the actual implementation for the file system.
-	file
+	// ReadSeekStater contains the actual implementation of the file logic, and
+	// interacts with the underlying file system.
+	//
+	// Note that we explicitly omit exposing this to JS to avoid leaking
+	// implementation details, but keep it public so that we can access it
+	// from other modules that would want to leverage its implementation of
+	// io.Reader and io.Seeker.
+	ReadSeekStater ReadSeekStater `js:"-"`
 
 	// vu holds a reference to the VU this file is associated with.
 	//
@@ -175,7 +206,7 @@ func (f *File) Stat() *sobek.Promise {
 	promise, resolve, _ := promises.New(f.vu)
 
 	go func() {
-		resolve(f.file.stat())
+		resolve(f.ReadSeekStater.Stat())
 	}()
 
 	return promise
@@ -188,25 +219,25 @@ func (f *File) Stat() *sobek.Promise {
 //
 // It is possible for a read to successfully return with 0 bytes.
 // This does not indicate EOF.
-func (f *File) Read(into sobek.Value) *sobek.Promise {
+func (f *File) Read(into sobek.Value) (*sobek.Promise, error) {
 	promise, resolve, reject := f.vu.Runtime().NewPromise()
 
 	if common.IsNullish(into) {
-		reject(newFsError(TypeError, "read() failed; reason: into argument cannot be null or undefined"))
-		return promise
+		err := reject(newFsError(TypeError, "read() failed; reason: into argument cannot be null or undefined"))
+		return promise, err
 	}
 
 	intoObj := into.ToObject(f.vu.Runtime())
 	if !isUint8Array(f.vu.Runtime(), intoObj) {
-		reject(newFsError(TypeError, "read() failed; reason: into argument must be a Uint8Array"))
-		return promise
+		err := reject(newFsError(TypeError, "read() failed; reason: into argument must be a Uint8Array"))
+		return promise, err
 	}
 
 	// Obtain the underlying ArrayBuffer from the Uint8Array
 	ab, ok := intoObj.Get("buffer").Export().(sobek.ArrayBuffer)
 	if !ok {
-		reject(newFsError(TypeError, "read() failed; reason: into argument must be a Uint8Array"))
-		return promise
+		err := reject(newFsError(TypeError, "read() failed; reason: into argument must be a Uint8Array"))
+		return promise, err
 	}
 
 	// To avoid concurrency linked to modifying the runtime's `into` buffer from multiple
@@ -220,36 +251,36 @@ func (f *File) Read(into sobek.Value) *sobek.Promise {
 	// occurs on the main thread, during the promise's resolution.
 	callback := f.vu.RegisterCallback()
 	go func() {
-		n, readErr := f.file.Read(buffer)
+		n, readErr := f.ReadSeekStater.Read(buffer)
 		callback(func() error {
 			_ = copy(intoBytes[0:n], buffer)
 
 			// Read was successful, resolve early with the number of
 			// bytes read.
 			if readErr == nil {
-				resolve(n)
-				return nil
+				return resolve(n)
+			}
+
+			// If the read operation failed, we need to check if it was an io.EOF error
+			// and match it to its fsError counterpart if that's the case.
+			if errors.Is(readErr, io.EOF) {
+				readErr = newFsError(EOFError, "read() failed; reason: EOF")
 			}
 
 			var fsErr *fsError
 			isFSErr := errors.As(readErr, &fsErr)
-
 			if !isFSErr {
-				reject(readErr)
-				return nil
+				return reject(readErr)
 			}
 
 			if fsErr.kind == EOFError && n == 0 {
-				resolve(sobek.Null())
-			} else {
-				resolve(n)
+				return resolve(sobek.Null())
 			}
-
-			return nil
+			return resolve(n)
 		})
 	}()
 
-	return promise
+	return promise, nil
 }
 
 // Seek seeks to the given `offset` in the file, under the given `whence` mode.
@@ -257,19 +288,19 @@ func (f *File) Read(into sobek.Value) *sobek.Promise {
 // The returned promise resolves to the new `offset` (position) within the file, which
 // is expressed in bytes from the selected start, current, or end position depending
 // the provided `whence`.
-func (f *File) Seek(offset sobek.Value, whence sobek.Value) *sobek.Promise {
+func (f *File) Seek(offset sobek.Value, whence sobek.Value) (*sobek.Promise, error) {
 	promise, resolve, reject := f.vu.Runtime().NewPromise()
 
 	intOffset, err := exportInt(offset)
 	if err != nil {
-		reject(newFsError(TypeError, "seek() failed; reason: the offset argument "+err.Error()))
-		return promise
+		err := reject(newFsError(TypeError, "seek() failed; reason: the offset argument "+err.Error()))
+		return promise, err
 	}
 
 	intWhence, err := exportInt(whence)
 	if err != nil {
-		reject(newFsError(TypeError, "seek() failed; reason: the whence argument "+err.Error()))
-		return promise
+		err := reject(newFsError(TypeError, "seek() failed; reason: the whence argument "+err.Error()))
+		return promise, err
 	}
 
 	seekMode := SeekMode(intWhence)
@@ -277,25 +308,23 @@ func (f *File) Seek(offset sobek.Value, whence sobek.Value) *sobek.Promise {
 	case SeekModeStart, SeekModeCurrent, SeekModeEnd:
 		// Valid modes, do nothing.
 	default:
-		reject(newFsError(TypeError, "seek() failed; reason: the whence argument must be a SeekMode"))
-		return promise
+		err := reject(newFsError(TypeError, "seek() failed; reason: the whence argument must be a SeekMode"))
+		return promise, err
 	}
 
 	callback := f.vu.RegisterCallback()
 	go func() {
-		newOffset, err := f.file.Seek(intOffset, seekMode)
+		newOffset, err := f.ReadSeekStater.Seek(intOffset, seekMode)
 		callback(func() error {
 			if err != nil {
-				reject(err)
-				return err
+				return reject(err)
 			}
 
-			resolve(newOffset)
-			return nil
+			return resolve(newOffset)
 		})
 	}()
 
-	return promise
+	return promise, nil
 }
 
 func isUint8Array(rt *sobek.Runtime, o *sobek.Object) bool {
