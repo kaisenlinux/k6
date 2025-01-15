@@ -143,8 +143,6 @@ github.com/evanw/esbuild/pkg/api
 # github.com/fatih/color v1.18.0
 ## explicit; go 1.17
 github.com/fatih/color
-# github.com/fsnotify/fsnotify v1.5.4
-## explicit; go 1.16
 # github.com/go-logr/logr v1.4.2
 ## explicit; go 1.18
 github.com/go-logr/logr
@@ -181,19 +179,6 @@ github.com/grafana/sobek/ftoa/internal/fast
 github.com/grafana/sobek/parser
 github.com/grafana/sobek/token
 github.com/grafana/sobek/unistring
-# github.com/grafana/xk6-browser v1.9.1
-## explicit; go 1.21
-github.com/grafana/xk6-browser/browser
-github.com/grafana/xk6-browser/chromium
-github.com/grafana/xk6-browser/common
-github.com/grafana/xk6-browser/common/js
-github.com/grafana/xk6-browser/env
-github.com/grafana/xk6-browser/k6error
-github.com/grafana/xk6-browser/k6ext
-github.com/grafana/xk6-browser/keyboardlayout
-github.com/grafana/xk6-browser/log
-github.com/grafana/xk6-browser/storage
-github.com/grafana/xk6-browser/trace
 # github.com/grafana/xk6-dashboard v0.7.5
 ## explicit; go 1.20
 github.com/grafana/xk6-dashboard/dashboard
@@ -286,12 +271,14 @@ github.com/mstoykov/atlas
 # github.com/mstoykov/envconfig v1.5.0
 ## explicit
 github.com/mstoykov/envconfig
-# github.com/mstoykov/k6-taskqueue-lib v0.1.0
-## explicit; go 1.17
+# github.com/mstoykov/k6-taskqueue-lib v0.1.2
+## explicit; go 1.21
 github.com/mstoykov/k6-taskqueue-lib/taskqueue
 # github.com/nu7hatch/gouuid v0.0.0-20131221200532-179d4d0c4d8d
 ## explicit
 github.com/nu7hatch/gouuid
+# github.com/nxadm/tail v1.4.11
+## explicit; go 1.13
 # github.com/pkg/browser v0.0.0-20210911075715-681adbf594b8
 ## explicit; go 1.14
 github.com/pkg/browser
@@ -444,7 +431,7 @@ go.opentelemetry.io/proto/otlp/trace/v1
 ## explicit; go 1.20
 go.uber.org/goleak
 go.uber.org/goleak/internal/stack
-# golang.org/x/crypto v0.28.0
+# golang.org/x/crypto v0.31.0
 ## explicit; go 1.20
 golang.org/x/crypto/md4
 golang.org/x/crypto/ocsp
@@ -452,7 +439,7 @@ golang.org/x/crypto/ripemd160
 # golang.org/x/crypto/x509roots/fallback v0.0.0-20240806160748-b2d3a6a4b4d3
 ## explicit; go 1.20
 golang.org/x/crypto/x509roots/fallback
-# golang.org/x/net v0.30.0
+# golang.org/x/net v0.33.0
 ## explicit; go 1.18
 golang.org/x/net/context
 golang.org/x/net/html
@@ -463,19 +450,20 @@ golang.org/x/net/http2/hpack
 golang.org/x/net/idna
 golang.org/x/net/internal/timeseries
 golang.org/x/net/trace
-# golang.org/x/sync v0.8.0
+# golang.org/x/sync v0.10.0
 ## explicit; go 1.18
+golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
-# golang.org/x/sys v0.26.0
+# golang.org/x/sys v0.28.0
 ## explicit; go 1.18
 golang.org/x/sys/plan9
 golang.org/x/sys/unix
 golang.org/x/sys/windows
 golang.org/x/sys/windows/registry
-# golang.org/x/term v0.25.0
+# golang.org/x/term v0.27.0
 ## explicit; go 1.18
 golang.org/x/term
-# golang.org/x/text v0.19.0
+# golang.org/x/text v0.21.0
 ## explicit; go 1.18
 golang.org/x/text/cases
 golang.org/x/text/collate
@@ -490,7 +478,7 @@ golang.org/x/text/transform
 golang.org/x/text/unicode/bidi
 golang.org/x/text/unicode/norm
 golang.org/x/text/unicode/rangetable
-# golang.org/x/time v0.7.0
+# golang.org/x/time v0.8.0
 ## explicit; go 1.18
 golang.org/x/time/rate
 # google.golang.org/genproto/googleapis/api v0.0.0-20240822170219-fc7c04adadcd
@@ -617,8 +605,6 @@ gopkg.in/cenkalti/backoff.v1
 # gopkg.in/guregu/null.v3 v3.3.0
 ## explicit
 gopkg.in/guregu/null.v3
-# gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7
-## explicit
 # gopkg.in/yaml.v3 v3.0.1
 ## explicit
 gopkg.in/yaml.v3
