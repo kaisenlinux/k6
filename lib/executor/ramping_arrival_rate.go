@@ -11,10 +11,10 @@ import (
 	"github.com/sirupsen/logrus"
 	"gopkg.in/guregu/null.v3"
 
+	"go.k6.io/k6/internal/ui/pb"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/lib/types"
 	"go.k6.io/k6/metrics"
-	"go.k6.io/k6/ui/pb"
 )
 
 const rampingArrivalRateType = "ramping-arrival-rate"
@@ -164,7 +164,7 @@ var _ lib.Executor = &RampingArrivalRate{}
 func (varr *RampingArrivalRate) Init(_ context.Context) error {
 	// err should always be nil, because Init() won't be called for executors
 	// with no work, as determined by their config's HasWork() method.
-	et, err := varr.BaseExecutor.executionState.ExecutionTuple.GetNewExecutionTupleFromValue(varr.config.MaxVUs.Int64)
+	et, err := varr.executionState.ExecutionTuple.GetNewExecutionTupleFromValue(varr.config.MaxVUs.Int64)
 	varr.et = et
 	varr.iterSegIndex = lib.NewSegmentedIndex(et)
 

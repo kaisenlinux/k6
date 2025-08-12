@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"go.k6.io/k6/lib/testutils"
+	"go.k6.io/k6/internal/lib/testutils"
 
 	"github.com/stretchr/testify/require"
 
@@ -68,7 +68,6 @@ func TestOldArchive(t *testing.T) {
 		"/absolulte/path2":   `unix script`,
 	}
 	for filename, data := range testCases {
-		filename, data := filename, data
 		t.Run(filename, func(t *testing.T) {
 			t.Parallel()
 			metadata := `{"filename": "` + filename + `", "options": {}}`

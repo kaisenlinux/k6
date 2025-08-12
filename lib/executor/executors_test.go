@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"go.k6.io/k6/lib/testutils"
+	"go.k6.io/k6/internal/build"
+	"go.k6.io/k6/internal/lib/testutils"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v3"
 
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/consts"
 	"go.k6.io/k6/lib/fsext"
 	"go.k6.io/k6/lib/types"
 )
@@ -63,14 +63,14 @@ var configMapTestCases = []configMapTestCase{
 			sched.Exec = null.StringFrom("someFunc")
 			sched.Env = map[string]string{"test": "mest"}
 			require.Equal(t, cm, lib.ScenarioConfigs{"someKey": sched})
-			require.Equal(t, sched.BaseConfig.Name, cm["someKey"].GetName())
-			require.Equal(t, sched.BaseConfig.Type, cm["someKey"].GetType())
-			require.Equal(t, sched.BaseConfig.GetGracefulStop(), cm["someKey"].GetGracefulStop())
+			require.Equal(t, sched.Name, cm["someKey"].GetName())
+			require.Equal(t, sched.Type, cm["someKey"].GetType())
+			require.Equal(t, sched.GetGracefulStop(), cm["someKey"].GetGracefulStop())
 			require.Equal(t,
-				sched.BaseConfig.StartTime.Duration,
+				sched.StartTime.Duration,
 				types.Duration(cm["someKey"].GetStartTime()),
 			)
-			require.Equal(t, sched.BaseConfig.Env, cm["someKey"].GetEnv())
+			require.Equal(t, sched.Env, cm["someKey"].GetEnv())
 
 			assert.Empty(t, cm["someKey"].Validate())
 			assert.Empty(t, cm.Validate())
@@ -428,7 +428,6 @@ var configMapTestCases = []configMapTestCase{
 func TestConfigMapParsingAndValidation(t *testing.T) {
 	t.Parallel()
 	for i, tc := range configMapTestCases {
-		tc := tc
 		t.Run(fmt.Sprintf("TestCase#%d", i), func(t *testing.T) {
 			t.Parallel()
 			t.Log(tc.rawJSON)
@@ -484,7 +483,7 @@ func TestArchiveRoundTripExecutorConfig(t *testing.T) {
 	}
 	arc1 := &lib.Archive{
 		Type:      "js",
-		K6Version: consts.Version,
+		K6Version: build.Version,
 		Options: lib.Options{
 			Scenarios: map[string]lib.ExecutorConfig{
 				"const-vus": execCfg,

@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"go.k6.io/k6/lib/testutils/mockresolver"
+	"go.k6.io/k6/internal/lib/testutils/mockresolver"
 	"go.k6.io/k6/lib/types"
 )
 
@@ -63,7 +63,6 @@ func TestResolver(t *testing.T) {
 		}
 
 		for _, tc := range testCases {
-			tc := tc
 			t.Run(fmt.Sprintf("%s_%s_%s", tc.ttl, tc.sel, tc.pol), func(t *testing.T) {
 				t.Parallel()
 				r := NewResolver(mr.LookupIPAll, tc.ttl, tc.sel, tc.pol)

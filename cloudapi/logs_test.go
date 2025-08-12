@@ -20,8 +20,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v3"
 
-	"go.k6.io/k6/lib/testutils"
-	"go.k6.io/k6/lib/testutils/httpmultibin"
+	"go.k6.io/k6/internal/lib/testutils"
+	"go.k6.io/k6/internal/lib/testutils/httpmultibin"
 )
 
 func TestMsgParsing(t *testing.T) {
@@ -150,7 +150,6 @@ func TestRetry(t *testing.T) {
 		}
 
 		for _, tt := range tests {
-			tt := tt
 			t.Run(tt.name, func(t *testing.T) {
 				t.Parallel()
 				var sleepRequests []time.Duration
@@ -248,7 +247,7 @@ func TestStreamLogsToLogger(t *testing.T) {
 			require.NoError(t, err)
 
 			// wait the flush on the network
-			time.Sleep(25 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 			cancel()
 		})
 

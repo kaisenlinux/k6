@@ -19,6 +19,7 @@ export const options = {
         },
       },
       exec: 'networkThrottled',
+      startTime: "10s",
     },
     cpuThrottled: {
       executor: 'shared-iterations',
@@ -28,6 +29,7 @@ export const options = {
         },
       },
       exec: 'cpuThrottled',
+      startTime: "5s",
     },
   },
   thresholds: {
@@ -43,7 +45,7 @@ export async function normal() {
   const page = await context.newPage();
 
   try {
-    await page.goto('https://test.k6.io/', { waitUntil: 'networkidle' });
+    await page.goto('https://quickpizza.grafana.com/test.k6.io/', { waitUntil: 'networkidle' });
   } finally {
     await page.close();
   }
@@ -56,7 +58,7 @@ export async function networkThrottled() {
   try {
     await page.throttleNetwork(networkProfiles["Slow 3G"]);
 
-    await page.goto('https://test.k6.io/', { waitUntil: 'networkidle' });
+    await page.goto('https://quickpizza.grafana.com/test.k6.io/', { waitUntil: 'networkidle' });
   } finally {
     await page.close();
   }
@@ -69,7 +71,7 @@ export async function cpuThrottled() {
   try {
     await page.throttleCPU({ rate: 4 });
 
-    await page.goto('https://test.k6.io/', { waitUntil: 'networkidle' });
+    await page.goto('https://quickpizza.grafana.com/test.k6.io/', { waitUntil: 'networkidle' });
   } finally {
     await page.close();
   }

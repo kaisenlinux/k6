@@ -133,6 +133,7 @@ const (
 	ES2021
 	ES2022
 	ES2023
+	ES2024
 )
 
 type Loader uint16
@@ -179,6 +180,7 @@ type Packages uint8
 
 const (
 	PackagesDefault Packages = iota
+	PackagesBundle
 	PackagesExternal
 )
 
@@ -470,13 +472,19 @@ func Transform(input string, options TransformOptions) TransformResult {
 
 // Documentation: https://esbuild.github.io/api/#serve-arguments
 type ServeOptions struct {
-	Port      uint16
+	Port      int
 	Host      string
 	Servedir  string
 	Keyfile   string
 	Certfile  string
 	Fallback  string
+	CORS      CORSOptions
 	OnRequest func(ServeOnRequestArgs)
+}
+
+// Documentation: https://esbuild.github.io/api/#cors
+type CORSOptions struct {
+	Origin []string
 }
 
 type ServeOnRequestArgs struct {
@@ -489,8 +497,8 @@ type ServeOnRequestArgs struct {
 
 // Documentation: https://esbuild.github.io/api/#serve-return-values
 type ServeResult struct {
-	Port uint16
-	Host string
+	Port  uint16
+	Hosts []string
 }
 
 type WatchOptions struct {
@@ -576,6 +584,7 @@ type ResolveOptions struct {
 	ResolveDir string
 	Kind       ResolveKind
 	PluginData interface{}
+	With       map[string]string
 }
 
 // Documentation: https://esbuild.github.io/plugins/#resolve-results
@@ -615,6 +624,7 @@ type OnResolveArgs struct {
 	ResolveDir string
 	Kind       ResolveKind
 	PluginData interface{}
+	With       map[string]string
 }
 
 // Documentation: https://esbuild.github.io/plugins/#on-resolve-results

@@ -88,8 +88,13 @@ func TestConstantArrivalRateRunCorrectRate(t *testing.T) {
 		// check that we got around the amount of VU iterations as we would expect
 		var totalCount int64
 
-		for i := 0; i < 5; i++ {
-			time.Sleep(time.Second)
+		i := 5
+		ticker := time.NewTicker(time.Second)
+		for range ticker.C {
+			i--
+			if i == 0 {
+				break
+			}
 			currentCount := atomic.SwapInt64(&count, 0)
 			totalCount += currentCount
 			// We have a relatively relaxed constraint here, but we also check
@@ -165,8 +170,6 @@ func TestConstantArrivalRateRunCorrectTiming(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		test := test
-
 		t.Run(fmt.Sprintf("segment %s sequence %s", test.segment, test.sequence), func(t *testing.T) {
 			var count int64
 			startTime := time.Now()
@@ -235,7 +238,6 @@ func TestArrivalRateCancel(t *testing.T) {
 		"ramping":  getTestRampingArrivalRateConfig(),
 	}
 	for name, config := range testCases {
-		config := config
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			ch := make(chan struct{})
@@ -333,7 +335,6 @@ func TestConstantArrivalRateGlobalIters(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(fmt.Sprintf("%s_%s", tc.seq, tc.seg), func(t *testing.T) {
 			t.Parallel()
 

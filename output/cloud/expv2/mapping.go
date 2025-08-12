@@ -5,9 +5,11 @@ import (
 	"strings"
 
 	"github.com/mstoykov/atlas"
-	"go.k6.io/k6/metrics"
-	"go.k6.io/k6/output/cloud/expv2/pbcloud"
 	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"go.k6.io/k6/internal/ds/histogram"
+	"go.k6.io/k6/internal/output/cloud/expv2/pbcloud"
+	"go.k6.io/k6/metrics"
 )
 
 // TODO: unit test
@@ -99,7 +101,7 @@ func addBucketToTimeSeriesProto(
 			NonzeroCount: typedMetricValue.NonZeroCount,
 			TotalCount:   typedMetricValue.Total,
 		})
-	case *histogram:
+	case *histogram.Hdr:
 		samples := timeSeries.GetTrendHdrSamples()
 		samples.Values = append(samples.Values, histogramAsProto(typedMetricValue, time))
 	default:

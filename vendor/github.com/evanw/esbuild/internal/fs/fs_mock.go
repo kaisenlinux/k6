@@ -116,7 +116,7 @@ func (fs *mockFS) ModKey(path string) (ModKey, error) {
 }
 
 func win2unix(p string) string {
-	if strings.HasPrefix(p, "C:\\") {
+	if strings.HasPrefix(p, "C:\\") || strings.HasPrefix(p, "c:\\") {
 		p = p[2:]
 	}
 	p = strings.ReplaceAll(p, "\\", "/")
@@ -279,6 +279,10 @@ func (fs *mockFS) Rel(base string, target string) (string, bool) {
 		target = unix2win(target)
 	}
 	return target, true
+}
+
+func (fs *mockFS) EvalSymlinks(path string) (string, bool) {
+	return "", false
 }
 
 func (fs *mockFS) kind(dir string, base string) (symlink string, kind EntryKind) {

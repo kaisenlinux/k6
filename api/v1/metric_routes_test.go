@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/guregu/null.v3"
 
+	"go.k6.io/k6/internal/lib/testutils/minirunner"
 	"go.k6.io/k6/lib"
-	"go.k6.io/k6/lib/testutils/minirunner"
 	"go.k6.io/k6/metrics"
 )
 
@@ -120,6 +120,8 @@ func TestGetMetric(t *testing.T) {
 		})
 
 		t.Run("metric", func(t *testing.T) {
+			t.Parallel()
+
 			var envelop metricJSONAPI
 
 			assert.NoError(t, json.Unmarshal(rw.Body.Bytes(), &envelop))

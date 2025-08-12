@@ -1,3 +1,10 @@
+k6 (1.1.0-1kaisen) kaisen-packages; urgency=medium
+
+  * Import the 1.1.0 release
+  * Update the quilt patch
+
+ -- Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>  Sat, 09 Aug 2025 17:12:04 +0200
+
 k6 (0.56.0-1kaisen) kaisen-packages; urgency=medium
 
   * Import the 0.56.0 release

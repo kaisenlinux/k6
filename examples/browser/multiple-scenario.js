@@ -5,7 +5,7 @@ export const options = {
     messages: {
       executor: 'constant-vus',
       exec: 'messages',
-      vus: 2,
+      vus: 1,
       duration: '2s',
       options: {
         browser: {
@@ -16,8 +16,8 @@ export const options = {
     news: {
       executor: 'per-vu-iterations',
       exec: 'news',
-      vus: 2,
-      iterations: 4,
+      vus: 1,
+      iterations: 2,
       maxDuration: '5s',
       options: {
         browser: {
@@ -36,7 +36,7 @@ export async function messages() {
   const page = await browser.newPage();
 
   try {
-    await page.goto('https://test.k6.io/my_messages.php', { waitUntil: 'networkidle' });
+    await page.goto('https://quickpizza.grafana.com/test.k6.io/my_messages.php', { waitUntil: 'networkidle' });
   } finally {
     await page.close();
   }
@@ -46,7 +46,7 @@ export async function news() {
   const page = await browser.newPage();
 
   try {
-    await page.goto('https://test.k6.io/news.php', { waitUntil: 'networkidle' });
+    await page.goto('https://quickpizza.grafana.com/test.k6.io/news.php', { waitUntil: 'networkidle' });
   } finally {
     await page.close();
   }

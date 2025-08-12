@@ -7,7 +7,7 @@ Author: Kevin Chevreuil - Kaisen <kaisen@kaisenlinux.org>
  export OUT_DIR="${1-dist}"
  # To override the latest git tag as the version, pass something else as the second arg.
 -export VERSION=${2:-$(git describe --tags --always --dirty)}
-+export VERSION=0.56.0
++export VERSION=1.1.0
  
  set +x
  

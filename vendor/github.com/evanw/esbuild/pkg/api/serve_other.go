@@ -48,6 +48,8 @@ type apiHandler struct {
 	keyfileToLower   string
 	certfileToLower  string
 	fallback         string
+	hosts            []string
+	corsOrigin       []string
 	serveWaitGroup   sync.WaitGroup
 	activeStreams    []chan serverSentEvent
 	currentHashes    map[string]string
@@ -103,10 +105,23 @@ func errorsToString(errors []Message) string {
 func (h *apiHandler) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	start := time.Now()
 
-	// Special-case the esbuild event stream
-	if req.Method == "GET" && req.URL.Path == "/esbuild" && req.Header.Get("Accept") == "text/event-stream" {
-		h.serveEventStream(start, req, res)
-		return
+	// Add CORS headers to all relevant requests
+	if origin := req.Header.Get("Origin"); origin != "" {
+		for _, allowed := range h.corsOrigin {
+			if allowed == "*" {
+				res.Header().Set("Access-Control-Allow-Origin", "*")
+				break
+			} else if star := strings.IndexByte(allowed, '*'); star >= 0 {
+				prefix, suffix := allowed[:star], allowed[star+1:]
+				if len(origin) >= len(prefix)+len(suffix) && strings.HasPrefix(origin, prefix) && strings.HasSuffix(origin, suffix) {
+					res.Header().Set("Access-Control-Allow-Origin", origin)
+					break
+				}
+			} else if origin == allowed {
+				res.Header().Set("Access-Control-Allow-Origin", origin)
+				break
+			}
+		}
 	}
 
 	// HEAD requests omit the body
@@ -116,9 +131,37 @@ func (h *apiHandler) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		maybeWriteResponseBody = func([]byte) { res.Write(nil) }
 	}
 
+	// Check the "Host" header to prevent DNS rebinding attacks
+	if strings.ContainsRune(req.Host, ':') {
+		// Try to strip off the port number
+		if host, _, err := net.SplitHostPort(req.Host); err == nil {
+			req.Host = host
+		}
+	}
+	if req.Host != "localhost" {
+		ok := false
+		for _, allowed := range h.hosts {
+			if req.Host == allowed {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			go h.notifyRequest(time.Since(start), req, http.StatusForbidden)
+			res.WriteHeader(http.StatusForbidden)
+			maybeWriteResponseBody([]byte(fmt.Sprintf("403 - Forbidden: The host %q is not allowed", req.Host)))
+			return
+		}
+	}
+
+	// Special-case the esbuild event stream
+	if req.Method == "GET" && req.URL.Path == "/esbuild" && req.Header.Get("Accept") == "text/event-stream" {
+		h.serveEventStream(start, req, res)
+		return
+	}
+
 	// Handle GET and HEAD requests
 	if (isHEAD || req.Method == "GET") && strings.HasPrefix(req.URL.Path, "/") {
-		res.Header().Set("Access-Control-Allow-Origin", "*")
 		queryPath := path.Clean(req.URL.Path)[1:]
 		result := h.rebuild()
 
@@ -360,7 +403,6 @@ func (h *apiHandler) serveEventStream(start time.Time, req *http.Request, res ht
 			res.Header().Set("Content-Type", "text/event-stream")
 			res.Header().Set("Connection", "keep-alive")
 			res.Header().Set("Cache-Control", "no-cache")
-			res.Header().Set("Access-Control-Allow-Origin", "*")
 			go h.notifyRequest(time.Since(start), req, http.StatusOK)
 			res.WriteHeader(http.StatusOK)
 			res.Write([]byte("retry: 500\n"))
@@ -714,6 +756,13 @@ func (ctx *internalContext) Serve(serveOptions ServeOptions) (ServeResult, error
 		}
 	}
 
+	// Validate the CORS origins
+	for _, origin := range serveOptions.CORS.Origin {
+		if star := strings.IndexByte(origin, '*'); star >= 0 && strings.ContainsRune(origin[star+1:], '*') {
+			return ServeResult{}, fmt.Errorf("Invalid origin: %s", origin)
+		}
+	}
+
 	// Stuff related to the output directory only matters if there are entry points
 	outdirPathPrefix := ""
 	if len(ctx.args.entryPoints) > 0 {
@@ -752,12 +801,19 @@ func (ctx *internalContext) Serve(serveOptions ServeOptions) (ServeResult, error
 	var listener net.Listener
 	network := "tcp4"
 	host := "0.0.0.0"
+	hostIsIP := true
 	if serveOptions.Host != "" {
 		host = serveOptions.Host
+		ip := net.ParseIP(host)
 
 		// Only use "tcp4" if this is an IPv4 address, otherwise use "tcp"
-		if ip := net.ParseIP(host); ip == nil || ip.To4() == nil {
+		if ip == nil || ip.To4() == nil {
 			network = "tcp"
+		}
+
+		// Remember whether the host is a valid IP address or not
+		if ip == nil {
+			hostIsIP = false
 		}
 	}
 
@@ -773,7 +829,11 @@ func (ctx *internalContext) Serve(serveOptions ServeOptions) (ServeResult, error
 	}
 	if listener == nil {
 		// Otherwise pick the provided port
-		if result, err := net.Listen(network, net.JoinHostPort(host, fmt.Sprintf("%d", serveOptions.Port))); err != nil {
+		port := serveOptions.Port
+		if port < 0 || port > 0xFFFF {
+			port = 0 // Pick a random port if the provided port is out of range
+		}
+		if result, err := net.Listen(network, net.JoinHostPort(host, fmt.Sprintf("%d", port))); err != nil {
 			return ServeResult{}, err
 		} else {
 			listener = result
@@ -785,11 +845,34 @@ func (ctx *internalContext) Serve(serveOptions ServeOptions) (ServeResult, error
 
 	// Extract the real port in case we passed a port of "0"
 	var result ServeResult
+	var boundHost string
 	if host, text, err := net.SplitHostPort(addr); err == nil {
 		if port, err := strconv.ParseInt(text, 10, 32); err == nil {
 			result.Port = uint16(port)
-			result.Host = host
+			boundHost = host
 		}
+	}
+
+	// Build up a list of all hosts we use
+	if ip := net.ParseIP(boundHost); ip != nil && ip.IsUnspecified() {
+		// If this is "0.0.0.0" or "::", list all relevant IP addresses
+		if addrs, err := net.InterfaceAddrs(); err == nil {
+			for _, addr := range addrs {
+				if addr, ok := addr.(*net.IPNet); ok && (addr.IP.To4() != nil) == (ip.To4() != nil) && !addr.IP.IsLinkLocalUnicast() {
+					result.Hosts = append(result.Hosts, addr.IP.String())
+				}
+			}
+		}
+	} else {
+		result.Hosts = append(result.Hosts, boundHost)
+	}
+
+	// If the host isn't a valid IP address, add it to the list of allowed hosts.
+	// For example, mapping "local.example.com" to "127.0.0.1" in "/etc/hosts"
+	// and then using "--serve=local.example.com:8000" should make it possible to
+	// successfully visit "http://local.example.com:8000/" in a browser.
+	if !hostIsIP {
+		result.Hosts = append(result.Hosts, host)
 	}
 
 	// HTTPS-related files should be absolute paths
@@ -811,6 +894,8 @@ func (ctx *internalContext) Serve(serveOptions ServeOptions) (ServeResult, error
 		keyfileToLower:   strings.ToLower(serveOptions.Keyfile),
 		certfileToLower:  strings.ToLower(serveOptions.Certfile),
 		fallback:         serveOptions.Fallback,
+		hosts:            append([]string{}, result.Hosts...),
+		corsOrigin:       append([]string{}, serveOptions.CORS.Origin...),
 		rebuild: func() BuildResult {
 			if atomic.LoadInt32(&shouldStop) != 0 {
 				// Don't start more rebuilds if we were told to stop
@@ -901,7 +986,7 @@ func (ctx *internalContext) Serve(serveOptions ServeOptions) (ServeResult, error
 
 	// Print the URL(s) that the server can be reached at
 	if ctx.args.logOptions.LogLevel <= logger.LevelInfo {
-		printURLs(result.Host, result.Port, isHTTPS, ctx.args.logOptions.Color)
+		printURLs(handler.hosts, result.Port, isHTTPS, ctx.args.logOptions.Color)
 	}
 
 	// Start the first build shortly after this function returns (but not
@@ -937,27 +1022,10 @@ func (hack *hackListener) Accept() (net.Conn, error) {
 	return hack.Listener.Accept()
 }
 
-func printURLs(host string, port uint16, https bool, useColor logger.UseColor) {
+func printURLs(hosts []string, port uint16, https bool, useColor logger.UseColor) {
 	logger.PrintTextWithColor(os.Stderr, useColor, func(colors logger.Colors) string {
-		var hosts []string
 		sb := strings.Builder{}
 		sb.WriteString(colors.Reset)
-
-		// If this is "0.0.0.0" or "::", list all relevant IP addresses
-		if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
-			if addrs, err := net.InterfaceAddrs(); err == nil {
-				for _, addr := range addrs {
-					if addr, ok := addr.(*net.IPNet); ok && (addr.IP.To4() != nil) == (ip.To4() != nil) && !addr.IP.IsLinkLocalUnicast() {
-						hosts = append(hosts, addr.IP.String())
-					}
-				}
-			}
-		}
-
-		// Otherwise, just list the one IP address
-		if len(hosts) == 0 {
-			hosts = append(hosts, host)
-		}
 
 		// Determine the host kinds
 		kinds := make([]string, len(hosts))

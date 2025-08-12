@@ -6,18 +6,31 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"sync"
+
+	"go.k6.io/k6/lib"
 
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
 	"github.com/sirupsen/logrus"
 
-	"go.k6.io/k6/event"
+	"go.k6.io/k6/internal/event"
+	"go.k6.io/k6/internal/ui/console"
+	"go.k6.io/k6/internal/usage"
 	"go.k6.io/k6/lib/fsext"
-	"go.k6.io/k6/ui/console"
+	"go.k6.io/k6/secretsource"
 )
 
-const defaultConfigFileName = "config.json"
+const (
+	// BinaryProvisioningFeatureFlag defines the environment variable that enables the binary provisioning
+	BinaryProvisioningFeatureFlag = "K6_BINARY_PROVISIONING"
+
+	defaultBuildServiceURL = "https://ingest.k6.io/builder/api/v1"
+	defaultConfigFileName  = "config.json"
+	defaultBinaryCacheDir  = "builds"
+)
 
 // GlobalState contains the GlobalFlags and accessors for most of the global
 // process-external state like CLI arguments, env vars, standard input, output
@@ -35,12 +48,13 @@ const defaultConfigFileName = "config.json"
 type GlobalState struct {
 	Ctx context.Context
 
-	FS         fsext.Fs
-	Getwd      func() (string, error)
-	BinaryName string
-	CmdArgs    []string
-	Env        map[string]string
-	Events     *event.System
+	FS              fsext.Fs
+	Getwd           func() (string, error)
+	UserOSConfigDir string
+	BinaryName      string
+	CmdArgs         []string
+	Env             map[string]string
+	Events          *event.System
 
 	DefaultFlags, Flags GlobalFlags
 
@@ -54,6 +68,10 @@ type GlobalState struct {
 
 	Logger         *logrus.Logger //nolint:forbidigo //TODO:change to FieldLogger
 	FallbackLogger logrus.FieldLogger
+
+	SecretsManager *secretsource.Manager
+	Usage          *usage.Usage
+	TestStatus     *lib.TestStatus
 }
 
 // NewGlobalState returns a new GlobalState with the given ctx.
@@ -81,21 +99,14 @@ func NewGlobalState(ctx context.Context) *GlobalState {
 		IsTTY:    stderrTTY,
 	}
 
-	env := BuildEnvMap(os.Environ())
-	_, noColorsSet := env["NO_COLOR"] // even empty values disable colors
-	logger := &logrus.Logger{
-		Out: stderr,
-		Formatter: &logrus.TextFormatter{
-			ForceColors:   stderrTTY,
-			DisableColors: !stderrTTY || noColorsSet || env["K6_NO_COLOR"] != "",
-		},
-		Hooks: make(logrus.LevelHooks),
-		Level: logrus.InfoLevel,
-	}
-
 	confDir, err := os.UserConfigDir()
 	if err != nil {
 		confDir = ".config"
+	}
+
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		confDir = ".cache"
 	}
 
 	binary, err := os.Executable()
@@ -103,32 +114,52 @@ func NewGlobalState(ctx context.Context) *GlobalState {
 		binary = "k6"
 	}
 
-	defaultFlags := GetDefaultFlags(confDir)
+	env := BuildEnvMap(os.Environ())
+	defaultFlags := GetDefaultFlags(confDir, cacheDir)
+	globalFlags := getFlags(defaultFlags, env, os.Args)
+
+	logLevel := logrus.InfoLevel
+	if globalFlags.Verbose {
+		logLevel = logrus.DebugLevel
+	}
+
+	logger := &logrus.Logger{
+		Out: stderr,
+		Formatter: &logrus.TextFormatter{
+			ForceColors:   stderrTTY,
+			DisableColors: !stderrTTY || globalFlags.NoColor,
+		},
+		Hooks: make(logrus.LevelHooks),
+		Level: logLevel,
+	}
 
 	return &GlobalState{
-		Ctx:          ctx,
-		FS:           fsext.NewOsFs(),
-		Getwd:        os.Getwd,
-		BinaryName:   filepath.Base(binary),
-		CmdArgs:      os.Args,
-		Env:          env,
-		Events:       event.NewEventSystem(100, logger),
-		DefaultFlags: defaultFlags,
-		Flags:        getFlags(defaultFlags, env),
-		OutMutex:     outMutex,
-		Stdout:       stdout,
-		Stderr:       stderr,
-		Stdin:        os.Stdin,
-		OSExit:       os.Exit,
-		SignalNotify: signal.Notify,
-		SignalStop:   signal.Stop,
-		Logger:       logger,
+		Ctx:             ctx,
+		FS:              fsext.NewOsFs(),
+		Getwd:           os.Getwd,
+		UserOSConfigDir: confDir,
+		BinaryName:      filepath.Base(binary),
+		CmdArgs:         os.Args,
+		Env:             env,
+		Events:          event.NewEventSystem(100, logger),
+		DefaultFlags:    defaultFlags,
+		Flags:           globalFlags,
+		OutMutex:        outMutex,
+		Stdout:          stdout,
+		Stderr:          stderr,
+		Stdin:           os.Stdin,
+		OSExit:          os.Exit,
+		SignalNotify:    signal.Notify,
+		SignalStop:      signal.Stop,
+		Logger:          logger,
 		FallbackLogger: &logrus.Logger{ // we may modify the other one
 			Out:       stderr,
 			Formatter: new(logrus.TextFormatter), // no fancy formatting here
 			Hooks:     make(logrus.LevelHooks),
 			Level:     logrus.InfoLevel,
 		},
+		Usage:      usage.New(),
+		TestStatus: lib.NewTestStatus(),
 	}
 }
 
@@ -140,21 +171,28 @@ type GlobalFlags struct {
 	Address          string
 	ProfilingEnabled bool
 	LogOutput        string
+	SecretSource     []string
 	LogFormat        string
 	Verbose          bool
+
+	BinaryProvisioning bool
+	BuildServiceURL    string
+	BinaryCache        string
 }
 
 // GetDefaultFlags returns the default global flags.
-func GetDefaultFlags(homeDir string) GlobalFlags {
+func GetDefaultFlags(homeDir string, cacheDir string) GlobalFlags {
 	return GlobalFlags{
 		Address:          "localhost:6565",
 		ProfilingEnabled: false,
-		ConfigFilePath:   filepath.Join(homeDir, "loadimpact", "k6", defaultConfigFileName),
+		ConfigFilePath:   filepath.Join(homeDir, "k6", defaultConfigFileName),
 		LogOutput:        "stderr",
+		BuildServiceURL:  defaultBuildServiceURL,
+		BinaryCache:      filepath.Join(cacheDir, "k6", defaultBinaryCacheDir),
 	}
 }
 
-func getFlags(defaultFlags GlobalFlags, env map[string]string) GlobalFlags {
+func getFlags(defaultFlags GlobalFlags, env map[string]string, args []string) GlobalFlags {
 	result := defaultFlags
 
 	// TODO: add env vars for the rest of the values (after adjusting
@@ -180,5 +218,20 @@ func getFlags(defaultFlags GlobalFlags, env map[string]string) GlobalFlags {
 	if _, ok := env["K6_PROFILING_ENABLED"]; ok {
 		result.ProfilingEnabled = true
 	}
+	if v, ok := env["K6_BINARY_PROVISIONING"]; ok {
+		vb, err := strconv.ParseBool(v)
+		if err == nil {
+			result.BinaryProvisioning = vb
+		}
+	}
+	if val, ok := env["K6_BUILD_SERVICE_URL"]; ok {
+		result.BuildServiceURL = val
+	}
+
+	// check if verbose flag is set
+	if slices.Contains(args, "-v") || slices.Contains(args, "--verbose") {
+		result.Verbose = true
+	}
+
 	return result
 }
